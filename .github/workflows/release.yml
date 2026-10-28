@@ -77,7 +77,7 @@ jobs:
           # claude-merge.yml starts this run as github-actions after an automatic merge.
           allowed_bots: "github-actions"
           claude_args: |
-            --max-turns 15
+            --max-turns 50
             --allowedTools "Read,Glob,Grep,Write,Bash(gh pr view:*),Bash(gh pr diff:*)"
           prompt: |
             Write the in-game patch notes for version ${{ steps.version.outputs.version }} of this bot, which releases
