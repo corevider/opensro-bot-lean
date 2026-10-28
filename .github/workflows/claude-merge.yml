@@ -40,6 +40,7 @@ jobs:
         run: |
           gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json number,headRefName,headRefOid,headRepository,headRepositoryOwner \
             --jq '"number=\(.number)", "ref=\(.headRefName)", "sha=\(.headRefOid)", "repo=\(.headRepositoryOwner.login)/\(.headRepository.name)"' | tee -a "$GITHUB_OUTPUT"
+          echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
@@ -65,6 +66,9 @@ jobs:
           git checkout -- bot.lean.user.js bot.lean.meta.js 2>/dev/null || true
 
       - uses: anthropics/claude-code-action@v1
+        # Going over the turn limit fails this step even after the verdict is posted; the merge step below
+        # only counts a verdict posted during this run, so carry on.
+        continue-on-error: true
         # DeepSeek through its Anthropic-compatible API (key from platform.deepseek.com).
         env:
           ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
@@ -120,9 +124,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ steps.pr.outputs.number }}
           TESTED: ${{ steps.final.outputs.sha }}
+          STARTED: ${{ steps.pr.outputs.started }}
         run: |
           set -e
-          verdict=$(gh pr view "$PR" --json comments --jq '[.comments[]|select(.author.login=="github-actions")|.body|capture("VERDICT: (?<v>MERGE|HOLD)").v]|last // "HOLD"')
+          verdict=$(gh pr view "$PR" --json comments --jq '[.comments[]|select(.author.login=="github-actions" and .createdAt >= env.STARTED)|.body|capture("VERDICT: (?<v>MERGE|HOLD)").v]|last // "HOLD"')
           [ "$verdict" = "MERGE" ] || { echo "Verdict: $verdict. Not merging."; exit 0; }
           if gh pr diff "$PR" --name-only | grep -q '^\.github/'; then echo "Touches .github/. Not merging."; exit 0; fi
           head=$(gh pr view "$PR" --json headRefOid --jq .headRefOid)

@@ -63,6 +63,8 @@ jobs:
       - name: Write the patch notes
         if: steps.check.outputs.release == 'true'
         uses: anthropics/claude-code-action@v1
+        # Going over the turn limit fails this step even when the notes are written; the next step checks them.
+        continue-on-error: true
         # DeepSeek through its Anthropic-compatible API (key from platform.deepseek.com).
         env:
           ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
