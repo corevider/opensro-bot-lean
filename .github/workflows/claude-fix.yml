@@ -113,7 +113,11 @@ jobs:
           outcome=$(head -1 .issue/result.md 2>/dev/null | tr -d '\r')
           echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
           [ "$outcome" = PR ] || exit 0
-          git add -A -- . ':!.issue'
+          if [ -f package.json ] && [ ! -s package.json ] && ! git ls-files --error-unmatch package.json >/dev/null 2>&1; then rm package.json; fi
+          # Stage edits to tracked files and new source-like files only: the sandbox leaves stray files
+          # (an empty package.json that breaks Node, dotfiles from its home directory).
+          stage() { git add -u -- . ':!.issue'; git ls-files --others --exclude-standard | grep -E '^(lean-[^/]+\.js|[^/]+\.test\.cjs|docs/.+\.md)$' | xargs -r git add --; }
+          stage
           if git diff --cached --quiet; then echo "outcome=EMPTY" >> "$GITHUB_OUTPUT"; exit 0; fi
           if git diff --cached --name-only | grep -qE '^(\.github/|vendor/|notes/)'; then echo "outcome=REFUSED" >> "$GITHUB_OUTPUT"; exit 0; fi
           { python3 build-lean.py | tail -1 && node --check bot.lean.user.js && echo "syntax ok" && node lean.test.cjs > .issue/tests.txt 2>&1; } > .issue/build.txt 2>&1 \
@@ -143,7 +147,7 @@ jobs:
           esac
           [ "$OUTCOME" = PR ] || exit 0
           if [ "$PASSED" != true ]; then
-            { echo "I tried a fix, but it does not pass the build or tests yet, so I did not open a PR:"; echo; echo '```'; tail -20 .issue/build.txt; echo '```'; } | comment
+            echo "I tried a fix, but it did not pass the build or tests, so I did not open a PR. A maintainer needs to look at this one. Details: $RUN" | comment
             exit 0
           fi
           [ -n "$APP_TOKEN" ] || { echo "No Claude app token; cannot open a PR that the merge workflow would pick up."; exit 1; }
@@ -154,7 +158,10 @@ jobs:
           git config user.name "claude[bot]"
           git config user.email "claude[bot]@users.noreply.github.com"
           git switch -q -c "$branch"
-          git add -A -- . ':!.issue'
+          # Stage edits to tracked files and new source-like files only: the sandbox leaves stray files
+          # (an empty package.json that breaks Node, dotfiles from its home directory).
+          stage() { git add -u -- . ':!.issue'; git ls-files --others --exclude-standard | grep -E '^(lean-[^/]+\.js|[^/]+\.test\.cjs|docs/.+\.md)$' | xargs -r git add --; }
+          stage
           git commit -q -m "$title" -m "Fixes #$ISSUE."
           git push -q --force "https://x-access-token:$APP_TOKEN@github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/heads/$branch"
           url=$(GH_TOKEN="$APP_TOKEN" gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --title "$title" --body-file .issue/body.md)
