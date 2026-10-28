@@ -44,7 +44,8 @@ Activity.userMessage = function( entry ) {
 			sell: "Selling loot.", ammo: "Buying ammunition.", repair: "Repairing equipment.",
 			"close-smith": "Finished at the repair merchant.", "walk-gate": "Walking to the return point.",
 			"open-gate": "Opening return travel.", reverse: "Preparing to return to the hunting area.",
-			"reverse-wait": "Returning to the hunting area…"
+			"reverse-wait": "Returning to the hunting area…",
+			leave: "Finished town services; walking back to the hunting spot."
 		};
 		return phases[phase] || "Continuing town services.";
 	}

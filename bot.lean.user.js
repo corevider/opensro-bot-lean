@@ -7403,8 +7403,14 @@ const Town = {
     return next === 'gate' && !this.reverses() ? 'leave' : 'walk-' + next;
   },
   // Walk back instead of reversing: the trip ends here and WalkBack, which resumes hunting on arrival, takes over.
+  // A trapped-character recovery trip stops in town instead, as it does before a reverse (lean-trap.js).
   leave() {
     const t = this.trip, gp = World.gp;
+    if (t.recovery) {
+      this.trip = null;
+      Hunt.stop('Recovery town services completed. Check the hunting spot before returning.');
+      return;
+    }
     if (gp.inventoryPending || World.isCasting()) return;
     if (t.supplies.some(s => Restock.count(s.refObjId) < s.target) || this.damaged().length || !t.revival && !this.scroll(0x09ec)) return this.fail('Final supply, repair or travel-scroll check failed.');
     if (World.freeBagSlots() <= 1) return this.fail('Returned to town; free at least two character bag slots before hunting again.');
@@ -10005,13 +10011,13 @@ const Reconnect = {
       return UI.toast(this.message, 'info', 4000);
     }
     // Back in the town of the saved services (a death while disconnected respawns there, or the drop came during a
-    // town trip) and far from the hunting spot: do the town services and reverse, as after a death, instead of walking.
+    // town trip) and far from the hunting spot: do the town services first, as after a death, then reverse or walk back.
     // The character may stand anywhere in town, so the services start from here instead of waiting at the scroll's
     // landing spot. Another town has none of the saved services: walk-back handles that.
     const H = Hunt.cfg(), spot = H.center && World.pose() ? dist2D(World.pose(), H.center) : NaN;
     const c = Town.cfg(), here = Town.detect(), home = Town.detect(c.vendor || c.storage || c.arrival || {});
     if (Town.autoRevive() && Number.isFinite(spot) && spot > Math.max(H.radius * 1.5, 600) && here && home && here.key === home.key) {
-      UI.toast('Back in the game, in town; doing town services and reversing to the hunting spot.', 'info', 4000);
+      UI.toast('Back in the game, in town; doing town services, then ' + (Town.reverses() ? 'reversing' : 'walking') + ' to the hunting spot.', 'info', 4000);
       Controller.returnAfterRevive();
       if (Town.trip?.phase === 'revive-arrival') Town.arrived();
       return this.clear(Town.trip ? '' : 'Back in the game, but the town cycle could not start: ' + Town.message);
@@ -15763,7 +15769,8 @@ Activity.userMessage = function( entry ) {
 			sell: "Selling loot.", ammo: "Buying ammunition.", repair: "Repairing equipment.",
 			"close-smith": "Finished at the repair merchant.", "walk-gate": "Walking to the return point.",
 			"open-gate": "Opening return travel.", reverse: "Preparing to return to the hunting area.",
-			"reverse-wait": "Returning to the hunting area…"
+			"reverse-wait": "Returning to the hunting area…",
+			leave: "Finished town services; walking back to the hunting spot."
 		};
 		return phases[phase] || "Continuing town services.";
 	}

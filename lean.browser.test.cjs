@@ -249,7 +249,7 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.evaluate(() => SROLean.settings.profile.party.resRadius), 400);
     // The town cycle and its triggers live on the Town page; with the cycle on, Supplies hides walking-route restock.
     await page.getByRole('button', { name: 'Town', exact: true }).click();
-    const townToggle = page.getByLabel('Use return scroll → town services → reverse return', { exact: true });
+    const townToggle = page.getByLabel('Use return scroll → town services → back to the hunting spot', { exact: true });
     assert.equal(await townToggle.isChecked(), false);
     await townToggle.check(); assert.equal(await page.evaluate(() => SROLean.town.cfg().enabled), true);
     await page.getByRole('button', { name: 'Supplies', exact: true }).click();
@@ -274,10 +274,10 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(await page.evaluate(() => { const c = SROLean.town.cfg(); return [c.broken, c.wear, c.noXp, c.every]; }),
       [true, { on: true, pct: 25 }, { on: true, minutes: 7 }, { on: true, minutes: 90 }]);
     await page.waitForFunction(() => document.getElementById('sro-bot-lean').shadowRoot.querySelectorAll('.trip-flow .skill-icon[data-icon-loaded=true]').length === 5);
-    assert.match(await page.locator('.trip-flow').innerText(), /Return scroll[\s\S]*Reverse/);
+    assert.match(await page.locator('.trip-flow').innerText(), /Return scroll[\s\S]*Way back/);
     await page.locator('.pane').screenshot({ path: __dirname + '/lean-town-page.png' });
     for (const label of ['Gear is worn', 'No XP for a while', 'On a timer']) await page.getByLabel(label, { exact: true }).uncheck();
-    const reviveToggle = page.getByLabel('Revive in town and use reverse return', { exact: true });
+    const reviveToggle = page.getByLabel('Revive in town and go back to the hunting spot', { exact: true });
     assert.equal(await reviveToggle.isChecked(), true);
     await reviveToggle.uncheck(); assert.equal(await page.evaluate(() => SROLean.town.cfg().revive), false);
     await reviveToggle.check(); assert.equal(await page.evaluate(() => SROLean.town.cfg().revive), true);

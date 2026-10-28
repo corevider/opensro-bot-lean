@@ -412,8 +412,14 @@ const Town = {
     return next === 'gate' && !this.reverses() ? 'leave' : 'walk-' + next;
   },
   // Walk back instead of reversing: the trip ends here and WalkBack, which resumes hunting on arrival, takes over.
+  // A trapped-character recovery trip stops in town instead, as it does before a reverse (lean-trap.js).
   leave() {
     const t = this.trip, gp = World.gp;
+    if (t.recovery) {
+      this.trip = null;
+      Hunt.stop('Recovery town services completed. Check the hunting spot before returning.');
+      return;
+    }
     if (gp.inventoryPending || World.isCasting()) return;
     if (t.supplies.some(s => Restock.count(s.refObjId) < s.target) || this.damaged().length || !t.revival && !this.scroll(0x09ec)) return this.fail('Final supply, repair or travel-scroll check failed.');
     if (World.freeBagSlots() <= 1) return this.fail('Returned to town; free at least two character bag slots before hunting again.');

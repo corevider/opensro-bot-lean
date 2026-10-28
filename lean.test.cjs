@@ -3112,6 +3112,17 @@ test('the walk back leaves only after the final checks and stops clearly when it
   assert.equal(f.Hunt.running, false, 'hunting waits for the arrival'); assert.match(f.Town.message, /walking back to the hunting spot/);
   assert.ok(f.Town.blocked(), 'no new trip starts during the walk');
 });
+test('a trapped-character recovery trip stops in town instead of walking back into the trap', () => {
+  for (const setup of [f => f.World.gp.inventory = f.World.gp.inventory.filter(i => i.slot !== 14), f => f.Town.cfg().returnBy = 'walk']) {
+    const f = townFixture(), gp = f.World.gp; setup(f);
+    gp.inventory.find(i => i.refObjId === 15).quantity = 50; gp.inventory.find(i => i.slot === 6).durability = 10; gp.pose.x = 100;
+    f.Town.begin(); f.Town.trip.recovery = true;
+    assert.equal(f.Town.closeNext('close-smith'), 'leave');
+    f.Hunt.running = true; f.Town.enter('leave'); f.Town.tick();
+    assert.equal(f.Town.trip, null); assert.equal(f.Hunt.running, false); assert.equal(f.WalkBack.active, null);
+    assert.ok(f.notices.some(n => /Recovery town services completed/.test(n)), f.notices.join(' | '));
+  }
+});
 test('resume hunting in town says it walks back when no reverse scroll is carried', () => {
   const f = townFixture(); f.Hunt.stop(); f.Town.detect = () => ({ key: 'KT' });
   f.World.gp.inventory = f.World.gp.inventory.filter(i => i.slot !== 14);
