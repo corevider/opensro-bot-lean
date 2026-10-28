@@ -3,7 +3,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/bot.lean.user.js', 'utf8');
 const isolated = source.slice(0, source.lastIndexOf('installWorkerHook();')) +
-  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, boot, Ticker, Sound, LeanMap};\n})();';
+  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, boot, Ticker, Sound, LeanMap};\n})();';
 function fixture(document) {
   let time = 100000;
   const storage = new Map(), commands = [], notices = [], intervals = [], timers = [];
@@ -1160,6 +1160,68 @@ test('walk-back follows a navdata route and starts hunting on arrival', async ()
   assert.equal(f.Hunt.running, true, 'hunting started on arrival');
   assert.ok(f.Log.lines.some(entry => /using navdata \(line\)/.test(entry.text)), 'the log names the route source');
 });
+// A clipper stand-in: the game map has a wall at x 5500 below z 5700 that the route data does not know.
+function wallClipper() {
+  const abs = p => ({ x: (p.regionId & 255) * 1920 + p.x, z: (p.regionId >>> 8 & 127) * 1920 + p.z });
+  const blocked = (a, b) => (a.x < 5500) !== (b.x < 5500) && a.z + (b.z - a.z) * (5500 - a.x) / (b.x - a.x) < 5700;
+  return { surface: p => ({ ...p }), available: () => true, clip: (from, to) => blocked(abs(from), abs(to)) ? { ...from } : { ...to } };
+}
+function checkedArea(f, name, columns = 6) {
+  const grid = navGrid(5000, 5000, columns, 6, 200);
+  const buffer = navBinary(grid.nodes, grid.edges, { originX: 5000, originZ: 5000 });
+  f.Route.setAreas([navArea(name, grid.nodes, buffer)]); f.Route.setLoader(() => buffer);
+  f.Hook.assetUrl = 'https://opensro.online/assets/entry-test.js';
+  return { from: navPose(5000, 5000), to: navPose(5000 + (columns - 1) * 200, 5000) };
+}
+test('a corridor is checked against the game map: an edge the collision does not walk is banned and walked around', async () => {
+  const f = fixture(), { from, to } = checkedArea(f, 'cliff'), clipper = wallClipper();
+  f.RouteCheck.region = async regionId => ({ regionId, clipper });
+  assert.equal(f.RouteCheck.available(), true);
+  const route = await f.Route.checked(from, to);
+  assert.ok(route, f.Route.message);
+  assert.ok(route.points.some(p => navAbs(p).z >= 5400), 'the corridor crosses where a short way round the wall exists');
+  assert.ok(f.Route.bans('cliff').has('2>3') && f.Route.bans('cliff').has('3>2'), 'the edge straight through the wall is banned, both ways, for the session');
+  assert.ok(f.Route.plan(from, to).points.some(p => navAbs(p).z >= 5400), 'later plans in the area keep the bans');
+  const g = fixture(), ends = checkedArea(g, 'unknown');
+  g.RouteCheck.region = async () => null;
+  const straight = await g.Route.checked(ends.from, ends.to);
+  assert.ok(straight); assert.equal(straight.points.some(p => navAbs(p).z > 5000), false, 'without collision data the corridor is walked as before');
+  assert.equal(g.Route.bans('unknown').size, 0);
+  const h = fixture(), shut = checkedArea(h, 'shut');
+  h.RouteCheck.region = async regionId => ({ regionId, clipper: { surface: p => ({ ...p }), available: () => true, clip: from => ({ ...from }) } });
+  assert.equal(await h.Route.checked(shut.from, shut.to), null, 'no corridor walks on the game map');
+  assert.match(h.Route.message, /walks on the game map/);
+});
+test('the asset worker is read from the page bootstrap when the worker hook ran too late; without it the walk is unchecked and says so', async () => {
+  const f = fixture(), bootstrap = { querySelector: () => ({ src: 'https://opensro.online/assets/bootstrap-X.js' }) };
+  assert.equal(f.RouteCheck.available(), false, 'no hook and no page: unchecked');
+  f.win.document = bootstrap;
+  f.win.fetch = async () => ({ text: async () => 'a=1;const w=new Worker(new URL("/assets/entry-C_test.js",""+import.meta.url),{type:"module",name:"sro-assets"});' });
+  assert.equal(f.RouteCheck.available(), true);
+  assert.equal(await f.RouteCheck.locate(), 'https://opensro.online/assets/entry-C_test.js');
+  assert.equal(f.Hook.assetUrl, 'https://opensro.online/assets/entry-C_test.js', 'found once for the session');
+  const g = fixture();
+  g.win.document = bootstrap; g.win.fetch = async () => ({ text: async () => 'no worker here' });
+  assert.equal(await g.RouteCheck.locate(), '');
+  const graph = { count: 2, x: Int32Array.from([5000, 5200]), z: Int32Array.from([5000, 5000]), y: Int16Array.from([0, 0]) };
+  assert.equal(await g.RouteCheck.verify('none', graph, 0, 1), null, 'the check did not run');
+  assert.ok(g.Log.lines.some(entry => /asset loader was not found/.test(entry.text)), 'the log says the route is unchecked');
+});
+test('walk-back waits for the checked corridor, then walks round the wall the route data does not know', async () => {
+  const f = fixture(), { from, to } = checkedArea(f, 'checked', 15), clipper = wallClipper();
+  f.RouteCheck.region = async regionId => ({ regionId, clipper });
+  assert.equal(await f.Route.ensure(from, to), true);
+  f.World.gp.pose = { ...from }; f.Settings.profile.hunt.center = { ...to };
+  f.Navigation.install(navWindow(from.regionId));
+  f.WalkBack.start(true);
+  assert.equal(f.WalkBack.active.source, 'planning');
+  f.advance(7000); f.WalkBack.tick();
+  assert.equal(f.WalkBack.active.source, 'planning', 'a running check is not cut short by the plain loading wait');
+  for (let n = 0; n < 200 && f.WalkBack.active.source === 'planning'; n++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.WalkBack.active.source, 'navdata');
+  assert.ok(f.WalkBack.active.route.some(p => navAbs(p).z >= 5400), 'the walked corridor goes round the wall');
+  assert.ok(f.Log.lines.some(entry => /checking it against the game map/.test(entry.text)));
+});
 test('walk-back falls back to legs without route data or between different areas', async () => {
   let f = fixture();
   f.Route.setAreas([]);
@@ -1185,7 +1247,7 @@ test('walk-back falls back to legs without route data or between different areas
   assert.ok(f.notices.some(n => /Walking back to the hunting spot/.test(n)));
   assert.ok(f.Log.lines.some(entry => /walking in legs/.test(entry.text)), 'the log names the fallback source');
 });
-test('a stuck navdata route re-plans once, then hands over to the leg fallback', async () => {
+test('a stuck navdata route skips two unreachable points, re-plans once, then hands over to the leg fallback', async () => {
   const f = fixture();
   const grid = navGrid(5000, 5000, 15, 1, 200);
   const buffer = navBinary(grid.nodes, grid.edges, { originX: 5000, originZ: 5000 });
@@ -1199,8 +1261,13 @@ test('a stuck navdata route re-plans once, then hands over to the leg fallback',
   assert.equal(f.WalkBack.active.source, 'navdata');
   f.Navigation.next = () => ({ error: 'No walkable route found through the loaded collision map.' });
   f.WalkBack.tick();                                // consume the start waypoint
-  f.advance(1000); f.WalkBack.tick();               // the next hop fails, so re-plan
+  const index = f.WalkBack.active.index;
+  f.advance(1000); f.WalkBack.tick();               // an unreachable waypoint is skipped
+  f.advance(1000); f.WalkBack.tick();               // and the next one
+  assert.equal(f.WalkBack.active.index, index + 2); assert.equal(f.WalkBack.active.navReplans, 0);
+  f.advance(1000); f.WalkBack.tick();               // a third in a row re-plans
   assert.equal(f.WalkBack.active.source, 'navdata'); assert.equal(f.WalkBack.active.navReplans, 1);
+  assert.equal(f.WalkBack.active.skips, 0, 'a new corridor may skip again');
   f.Route.plan = () => null;
   f.advance(21000); f.WalkBack.tick();               // the re-planned start is at the current pose
   f.advance(21000); f.WalkBack.tick();               // no progress now, so the leg fallback takes over

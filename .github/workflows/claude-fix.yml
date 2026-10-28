@@ -59,6 +59,8 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         id: claude
         if: env.skip != 'true'
+        # The steps below go by .issue/result.md, so going over the turn limit is not fatal.
+        continue-on-error: true
         # DeepSeek through its Anthropic-compatible API (key from platform.deepseek.com).
         env:
           ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
