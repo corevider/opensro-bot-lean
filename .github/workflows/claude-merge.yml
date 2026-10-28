@@ -79,7 +79,7 @@ jobs:
           allowed_non_write_users: "*"
           allowed_bots: "claude,github-actions"
           claude_args: |
-            --max-turns 40
+            --max-turns 80
             --allowedTools "Read,Glob,Grep,Edit,Write,Bash(gh pr view:*),Bash(gh issue view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(node:*),Bash(python3:*),Bash(cat:*),Bash(ls:*),Bash(cp:*),Bash(mkdir:*),Bash(cd:*),Bash(tail:*),Bash(head:*)"
           prompt: |
             Review pull request #${{ steps.pr.outputs.number }} in ${{ github.repository }} and decide whether it should be merged.
