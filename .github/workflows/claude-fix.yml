@@ -69,7 +69,6 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.DEEPSEEK_API_KEY }}
           allowed_non_write_users: "*"
-          show_full_output: true
           claude_args: |
             --max-turns 120
             --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(grep:*),Bash(wc:*)"
@@ -150,6 +149,7 @@ jobs:
             echo "I tried a fix, but it did not pass the build or tests, so I did not open a PR. A maintainer needs to look at this one. Details: $RUN" | comment
             exit 0
           fi
+          echo "Opening a PR (app token present: $([ -n "$APP_TOKEN" ] && echo yes || echo no))"
           [ -n "$APP_TOKEN" ] || { echo "No Claude app token; cannot open a PR that the merge workflow would pick up."; exit 1; }
           branch="fix/issue-$ISSUE"
           title=$(sed -n 2p .issue/result.md | tr -d '\r')
@@ -163,6 +163,8 @@ jobs:
           stage() { git add -u -- . ':!.issue'; git ls-files --others --exclude-standard | grep -E '^(lean-[^/]+\.js|[^/]+\.test\.cjs|docs/.+\.md)$' | xargs -r git add --; }
           stage
           git commit -q -m "$title" -m "Fixes #$ISSUE."
+          echo "Committed: $(git diff --stat HEAD~1 | tail -1)"
           git push -q --force "https://x-access-token:$APP_TOKEN@github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/heads/$branch"
+          echo "Pushed $branch"
           url=$(GH_TOKEN="$APP_TOKEN" gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --title "$title" --body-file .issue/body.md)
           echo "I opened a fix: $url. It is reviewed and tested automatically, and released if it passes." | comment
