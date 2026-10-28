@@ -13,7 +13,11 @@ const Route = {
   areas: typeof NAVDATA_AREAS !== 'undefined' ? NAVDATA_AREAS : [],
   base: typeof NAVDATA_BASE !== 'undefined' ? NAVDATA_BASE : '',
   cache: new Map(), loading: new Map(), dbp: null, loader: null, message: '',
-  setAreas(list) { this.areas = Array.isArray(list) ? list : []; this.cache.clear(); this.loading.clear(); this.message = ''; },
+  // Edges the game's collision does not walk (lean-route-check.js), per area, for this session: 'from>to' both ways.
+  banned: new Map(),
+  setAreas(list) { this.areas = Array.isArray(list) ? list : []; this.cache.clear(); this.loading.clear(); this.banned.clear(); this.message = ''; },
+  bans(name) { if (!this.banned.has(name)) this.banned.set(name, new Set()); return this.banned.get(name); },
+  ban(name, a, b) { this.bans(name).add(a + '>' + b).add(b + '>' + a); },
   setLoader(fn) { this.loader = typeof fn === 'function' ? fn : null; },
   absolute(p) {
     return p ? { x: (p.regionId & 255) * SECTOR + p.x, z: (p.regionId >>> 8) * SECTOR + p.z } : null;
@@ -179,7 +183,7 @@ const Route = {
     }
     return best < 0 ? null : { node: best, distance: Math.sqrt(score) };
   },
-  astar(graph, start, goal) {
+  astar(graph, start, goal, banned = null) {
     const count = graph.count, score = new Float64Array(count).fill(Infinity), came = new Int32Array(count).fill(-1);
     const closed = new Uint8Array(count), heap = [];
     const h = i => Math.hypot(graph.x[i] - graph.x[goal], graph.z[i] - graph.z[goal]);
@@ -226,7 +230,7 @@ const Route = {
       }
       for (let k = graph.offsets[node]; k < graph.offsets[node + 1]; k++) {
         const next = graph.neighbours[k];
-        if (closed[next]) continue;
+        if (closed[next] || banned?.has(node + '>' + next)) continue;
         const step = Math.hypot(graph.x[next] - graph.x[node], graph.z[next] - graph.z[node]) +
           Math.min(Math.abs(graph.y[next] - graph.y[node]), 200) * .25;
         const value = score[node] + step;
@@ -261,6 +265,21 @@ const Route = {
     for (let i = 1; i < points.length; i++) length.value += dist2D(points[i - 1], points[i]);
     return { points, length: length.value };
   },
+  // The corridor, checked against the game's collision first where the asset worker is known (lean-route-check.js).
+  // An edge it cannot walk is banned, so the plan below already goes around it.
+  async checked(from, to) {
+    if (!await this.ensure(from, to)) return null;
+    const meta = this.commonArea(from, to), area = meta && this.cache.get(meta.name);
+    let checked = false;
+    if (area && RouteCheck.available()) {
+      const graph = this.graph(area), here = this.absolute(from), there = this.absolute(to);
+      const start = this.nearest(graph, here.x, here.z), end = this.nearest(graph, there.x, there.z);
+      if (start && end && start.node !== end.node) checked = await RouteCheck.verify(meta.name, graph, start.node, end.node) !== null;
+    }
+    const plan = this.plan(from, to);
+    if (!plan && checked) this.message = 'No corridor in the route data walks on the game map.';
+    return plan;
+  },
   // null means "use the leg fallback"; it is not an error.
   plan(from, to) {
     this.message = '';
@@ -274,7 +293,7 @@ const Route = {
     const start = this.nearest(graph, here.x, here.z), end = this.nearest(graph, there.x, there.z);
     if (!start || !end) { this.message = 'No route node near the character or the hunting spot.'; return null; }
     if (start.node === end.node) return null;
-    const path = this.astar(graph, start.node, end.node);
+    const path = this.astar(graph, start.node, end.node, this.banned.get(a.name));
     if (!path) { this.message = 'No walkable path in the route data.'; return null; }
     const thinned = this.thin(graph, path, from.y);
     if (!thinned.points.length) return null;

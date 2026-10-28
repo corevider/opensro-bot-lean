@@ -37,7 +37,7 @@ Routine **Cast rejected: 5** events appear as one informational **Skill not read
 
 Under **Supplies → Automatic potion use**, enter **Potion delay (ms)** as a whole number from 0 to 60000. The default is 350 ms. This minimum interval is saved per character; item cooldowns and inventory admission still apply.
 
-Under **Town → Scroll town cycle**, enable the cycle, set up your recall town and services, and enable **Revive in town and use reverse return**. Choose **Last return-scroll location (hunting area)**, the default, or **Death location** for revival trips. The death location is used only when you died inside the hunting area; a death further away reverses to the last return-scroll point, because hunting starts again only from inside the hunting area. Ordinary repair/sell/refill trips reverse to their departure point. Carry reverse scrolls; missing or refused destinations stop the trip without silently switching destinations. Existing protections for your character's inventory remain unchanged.
+Under **Town → Scroll town cycle**, enable the cycle, set up your recall town and services, and enable **Revive in town and go back to the hunting spot**. Choose **Last return-scroll location (hunting area)**, the default, or **Death location** for revival trips. The death location is used only when you died inside the hunting area; a death further away reverses to the last return-scroll point, because hunting starts again only from inside the hunting area. Ordinary repair/sell/refill trips reverse to their departure point. Missing or refused reverse destinations stop the trip without silently switching destinations. Without a reverse scroll, or with **Back to the hunting spot** set to **Walk**, the trip walks back to the saved hunting spot instead (see below). Existing protections for your character's inventory remain unchanged.
 
 ## Item rules
 
@@ -61,10 +61,11 @@ Set this up once on the **Town** page, under **Scroll town cycle**:
 1. Bind your recall to **Hotan, Jangan, Donwhang, Constantinople or Samarkand** in the game. Stop the bot, pick your town in the **Town** list and click **Set up this town**; you do not have to be in town. It saves the town's known arrival point (where its return scroll always lands) and fills the **Warehouse**, **Potion merchant**, **Repair merchant** and **World statue / teleport** from the server's NPC data, each as a spot a few metres from the NPC. It only fills what is empty; **Redo all automatically** replaces every saved point, and an arrival point from another town is replaced automatically. **Auto-set town services** does the same for the town you are standing in. If the saved arrival point is not where the scroll actually lands, the bot corrects it itself: after a recall it confirmed, once the character has stood still for three seconds in a known town, it saves that spot as the arrival point and carries on. This is only done in the town the saved services belong to.
 2. To do it by hand instead, stand near and select each service, then save its point: **Warehouse**, **Potion merchant**, **Repair merchant** and **World statue / teleport**. Open the potion shop before saving its merchant. Manual saves override the automatic ones.
 3. Enable **Buy HP** and/or **Buy MP**, and set the low-stock thresholds. Set **HP refill to** and **MP refill to** in potion counts (defaults: **100 HP / 300 MP**). These targets apply to walking restock and every town trip, including full bags and revival. Town buys X-Large potions.
-4. Enable **Use return scroll → town services → reverse return**. Enable the pickup-pet capacity option if wanted.
-5. Carry gold, spare return/reverse scrolls and at least **two free character bag slots**. Save your hunting spot and start the bot.
+4. Enable **Use return scroll → town services → back to the hunting spot**. Enable the pickup-pet capacity option if wanted.
+5. Choose **Back to the hunting spot**: **Reverse return scroll** (the default) or **Walk**.
+6. Carry gold, spare return scrolls (and reverse scrolls for the reverse choice) and at least **two free character bag slots**. Save your hunting spot and start the bot.
 
-When supplies run low or a bag reaches its capacity trigger, the bot recalls to town, handles pet loot, refills pots, repairs gear and reverses to the **last return-scroll point**.
+When supplies run low or a bag reaches its capacity trigger, the bot recalls to town, handles pet loot, refills pots, repairs gear and reverses to the **last return-scroll point**. With **Walk**, or when no reverse scroll is carried and none could be bought in town, it skips the world statue and walks back to the saved hunting spot, then hunts again. A walk that cannot reach the spot stops the bot with a message, as **Return & hunt** does.
 
 - **Pet elixirs, magic stones and attribute stones:** stored in the warehouse. Stones are also deposited from your own bag; elixirs stay in your bag so alchemy can use them. Magic stones include the Astral, Luck, Steady and Immortal stones. Attribute tablets are not stones and count as other alchemy items.
 - **SoX gear:** Star, Moon and Sun equipment is deposited in the warehouse from your own bag and from the pet, on the next trip that visits the warehouse. Nothing is stored right after pickup. SoX gear that is part of a saved buff set, the weapon chosen for alchemy, or matches the **Keep in pet (names)** list is never deposited. Switch it off with **Deposit SoX gear in the warehouse**.
@@ -77,7 +78,7 @@ If protected items fill a bag, the bot stays in town and asks you to free space.
 
 ### What starts a town trip
 
-The **Town** page shows the trip as a row of pictures (return scroll, warehouse, potions, repair, reverse) with what each step still needs, and lists what starts a trip under **Go to town when…**:
+The **Town** page shows the trip as a row of pictures (return scroll, warehouse, potions, repair, way back) with what each step still needs, and lists what starts a trip under **Go to town when…**:
 
 - Always: the character bag has one free slot or less. Potions, vigor potions and pills at their low-stock numbers (Supplies), and arrows and bolts at theirs (Town).
 - **Return when pickup pet is nearly full**, with **Pet free slots ≤**.
@@ -139,7 +140,7 @@ For your other accounts. On the **Party** page tick **Join the main account's pa
 Tick **Start the bot when this character enters the game** under **Settings → Behaviour** (off by default, saved per character). Each time the character enters the game (after logging in or after going back to character select), the bot waits about 5 seconds for the game to settle: the character loaded, the inventory known, no manual-control pause, and collision data for up to 20 more seconds. Then it continues from where the character stands, the same way as after a reconnect:
 
 - **At the hunting spot:** it starts hunting.
-- **In the town of your saved town services, far from the spot:** with the scroll town cycle on, it does the town services from where it stands, without a return scroll, and reverses back to the hunting spot.
+- **In the town of your saved town services, far from the spot:** with the scroll town cycle on, it does the town services from where it stands, without a return scroll, then reverses or walks back to the hunting spot.
 - **Anywhere else:** it walks back to the hunting spot, as **Return & hunt** does.
 - **Dead:** it starts hunting so your death handling revives it and returns. With **On death: Stop** and the town revive off, it stays stopped and says so.
 
@@ -161,13 +162,13 @@ If the character was killed while the connection was gone, the bot starts huntin
 
 An application to the main's party that has not been answered after 30 seconds is sent again, so several alt accounts can join one main.
 
-If the character is back in a known town, far from the hunting spot, and the town cycle's revive option is on, the bot does the town services and reverses with the scroll (the same trip as after a death) instead of walking.
+If the character is back in a known town, far from the hunting spot, and the town cycle's revive option is on, the bot does the town services first (the same trip as after a death), then reverses with the scroll or walks back.
 
 If the plain **Disconnected from the server.** box stays up and the resume and three fresh entries have not brought the character back, the bot reloads the page the same way, with the same growing wait between reloads in a row. A server that is down for hours is still retried every 30 minutes, for up to 12 hours.
 
 ## Returning after death
 
-Leave **Revive in town and reverse to last scroll point** enabled under **Town → Go to town when…**. With the town cycle enabled, the bot revives, completes town services and reverses back to hunt. Hunting resumes within 30 metres of the last scroll point, or within your saved hunting area after death. Carry reverse scrolls.
+Leave **Revive in town and go back to the hunting spot** enabled under **Town → Go to town when…**. With the town cycle enabled, the bot revives, completes town services and reverses back to hunt. Hunting resumes within 30 metres of the last scroll point, or within your saved hunting area after death. Without a reverse scroll, or with **Back to the hunting spot** set to **Walk**, it walks back to the saved hunting spot instead.
 
 Updates, suggestions and bug reports are on Discord (https://discord.gg/Y5H5ZyfQ7u); the **Discord** button at the top of the panel opens the invite. After an update, a window beside the panel shows the patch notes of every version since the one you used before; the bot keeps running while it is open. Click the version number at the top of the panel to read them again. When a newer version is out, the top of the panel names it and its headline ("Update 1.2.77 available: …") next to the **Update** button.
 
@@ -280,6 +281,16 @@ The **×** at the top right of the panel, or **F6**, minimises it to a small ico
 | **Shift+F7** | Hide or show the panel; the bot keeps running |
 | **Return & hunt** | Walk to the saved hunting spot, then start hunting |
 | **Stop all** | Cancel hunting and automated trips; potion use has its own switch |
+
+## Long walks are checked against the game map (beta)
+
+A long walk back follows a corridor from the converted route data, which was made from another map and is wrong in places (a slope it climbs can be a cliff here). Before walking it, the bot asks the game for the collision of each region on the way, the same data the game loads when you get there, and walks every step of the corridor with the game's own movement rules. A step that does not walk is left out and the corridor is planned again around it, so the walk takes a way that exists, for example round the rim from Hotan to the Karakoram aircraft dock instead of through the crater. While it checks, the status says so and the character waits; a long corridor takes a few seconds to a minute. On the way, a corridor point the character cannot stand on (a rock edge) is passed close by or skipped. If the game's asset loader was not seen (the bot attached after the game started), the corridor is walked unchecked, as before.
+
+## Teleports and ferries on the way back (beta)
+
+When the hunting spot cannot be reached on foot from where the character stands (across a river, or between parts of the map with no walking connection), walking back uses the game's teleporters and ferries, the same ones you would click. Hotan to the western bank, for example, walks to the ferry on the Hotan side, pays its fee, crosses, and walks on to the spot. The bot picks the cheapest mix of walking and hops it can afford, selects the teleporter, waits for its menu and asks for the destination, exactly as the menu does. A teleporter that refuses (not enough gold, level too low, a trade cart) is left out and another way is tried; with no other way the walk stops and says why. A world change other than the hop itself, manual control, Stop or F8 ends the trip. Switch it off with **Walking back may use teleports and ferries (beta)** under **Combat → Hunting area**; then such a walk stops as before. The bot stops about 15 m from the teleporter, within talking range, because many stand on a dock or a ship.
+
+Both are beta: they were tested on the Hotan to Karakoram aircraft dock route. If a walk takes an odd way, send the log; the **Route check** and **Travel** lines show what was checked and used.
 
 ## If a town trip stalls on the way to a merchant
 

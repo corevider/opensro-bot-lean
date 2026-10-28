@@ -3,7 +3,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/bot.lean.user.js', 'utf8');
 const isolated = source.slice(0, source.lastIndexOf('installWorkerHook();')) +
-  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, boot, Ticker, Sound, LeanMap};\n})();';
+  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, Travel, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, boot, Ticker, Sound, LeanMap};\n})();';
 function fixture(document) {
   let time = 100000;
   const storage = new Map(), commands = [], notices = [], intervals = [], timers = [];
@@ -1160,6 +1160,68 @@ test('walk-back follows a navdata route and starts hunting on arrival', async ()
   assert.equal(f.Hunt.running, true, 'hunting started on arrival');
   assert.ok(f.Log.lines.some(entry => /using navdata \(line\)/.test(entry.text)), 'the log names the route source');
 });
+// A clipper stand-in: the game map has a wall at x 5500 below z 5700 that the route data does not know.
+function wallClipper() {
+  const abs = p => ({ x: (p.regionId & 255) * 1920 + p.x, z: (p.regionId >>> 8 & 127) * 1920 + p.z });
+  const blocked = (a, b) => (a.x < 5500) !== (b.x < 5500) && a.z + (b.z - a.z) * (5500 - a.x) / (b.x - a.x) < 5700;
+  return { surface: p => ({ ...p }), available: () => true, clip: (from, to) => blocked(abs(from), abs(to)) ? { ...from } : { ...to } };
+}
+function checkedArea(f, name, columns = 6) {
+  const grid = navGrid(5000, 5000, columns, 6, 200);
+  const buffer = navBinary(grid.nodes, grid.edges, { originX: 5000, originZ: 5000 });
+  f.Route.setAreas([navArea(name, grid.nodes, buffer)]); f.Route.setLoader(() => buffer);
+  f.Hook.assetUrl = 'https://opensro.online/assets/entry-test.js';
+  return { from: navPose(5000, 5000), to: navPose(5000 + (columns - 1) * 200, 5000) };
+}
+test('a corridor is checked against the game map: an edge the collision does not walk is banned and walked around', async () => {
+  const f = fixture(), { from, to } = checkedArea(f, 'cliff'), clipper = wallClipper();
+  f.RouteCheck.region = async regionId => ({ regionId, clipper });
+  assert.equal(f.RouteCheck.available(), true);
+  const route = await f.Route.checked(from, to);
+  assert.ok(route, f.Route.message);
+  assert.ok(route.points.some(p => navAbs(p).z >= 5400), 'the corridor crosses where a short way round the wall exists');
+  assert.ok(f.Route.bans('cliff').has('2>3') && f.Route.bans('cliff').has('3>2'), 'the edge straight through the wall is banned, both ways, for the session');
+  assert.ok(f.Route.plan(from, to).points.some(p => navAbs(p).z >= 5400), 'later plans in the area keep the bans');
+  const g = fixture(), ends = checkedArea(g, 'unknown');
+  g.RouteCheck.region = async () => null;
+  const straight = await g.Route.checked(ends.from, ends.to);
+  assert.ok(straight); assert.equal(straight.points.some(p => navAbs(p).z > 5000), false, 'without collision data the corridor is walked as before');
+  assert.equal(g.Route.bans('unknown').size, 0);
+  const h = fixture(), shut = checkedArea(h, 'shut');
+  h.RouteCheck.region = async regionId => ({ regionId, clipper: { surface: p => ({ ...p }), available: () => true, clip: from => ({ ...from }) } });
+  assert.equal(await h.Route.checked(shut.from, shut.to), null, 'no corridor walks on the game map');
+  assert.match(h.Route.message, /walks on the game map/);
+});
+test('the asset worker is read from the page bootstrap when the worker hook ran too late; without it the walk is unchecked and says so', async () => {
+  const f = fixture(), bootstrap = { querySelector: () => ({ src: 'https://opensro.online/assets/bootstrap-X.js' }) };
+  assert.equal(f.RouteCheck.available(), false, 'no hook and no page: unchecked');
+  f.win.document = bootstrap;
+  f.win.fetch = async () => ({ text: async () => 'a=1;const w=new Worker(new URL("/assets/entry-C_test.js",""+import.meta.url),{type:"module",name:"sro-assets"});' });
+  assert.equal(f.RouteCheck.available(), true);
+  assert.equal(await f.RouteCheck.locate(), 'https://opensro.online/assets/entry-C_test.js');
+  assert.equal(f.Hook.assetUrl, 'https://opensro.online/assets/entry-C_test.js', 'found once for the session');
+  const g = fixture();
+  g.win.document = bootstrap; g.win.fetch = async () => ({ text: async () => 'no worker here' });
+  assert.equal(await g.RouteCheck.locate(), '');
+  const graph = { count: 2, x: Int32Array.from([5000, 5200]), z: Int32Array.from([5000, 5000]), y: Int16Array.from([0, 0]) };
+  assert.equal(await g.RouteCheck.verify('none', graph, 0, 1), null, 'the check did not run');
+  assert.ok(g.Log.lines.some(entry => /asset loader was not found/.test(entry.text)), 'the log says the route is unchecked');
+});
+test('walk-back waits for the checked corridor, then walks round the wall the route data does not know', async () => {
+  const f = fixture(), { from, to } = checkedArea(f, 'checked', 15), clipper = wallClipper();
+  f.RouteCheck.region = async regionId => ({ regionId, clipper });
+  assert.equal(await f.Route.ensure(from, to), true);
+  f.World.gp.pose = { ...from }; f.Settings.profile.hunt.center = { ...to };
+  f.Navigation.install(navWindow(from.regionId));
+  f.WalkBack.start(true);
+  assert.equal(f.WalkBack.active.source, 'planning');
+  f.advance(7000); f.WalkBack.tick();
+  assert.equal(f.WalkBack.active.source, 'planning', 'a running check is not cut short by the plain loading wait');
+  for (let n = 0; n < 200 && f.WalkBack.active.source === 'planning'; n++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.WalkBack.active.source, 'navdata');
+  assert.ok(f.WalkBack.active.route.some(p => navAbs(p).z >= 5400), 'the walked corridor goes round the wall');
+  assert.ok(f.Log.lines.some(entry => /checking it against the game map/.test(entry.text)));
+});
 test('walk-back falls back to legs without route data or between different areas', async () => {
   let f = fixture();
   f.Route.setAreas([]);
@@ -1185,7 +1247,7 @@ test('walk-back falls back to legs without route data or between different areas
   assert.ok(f.notices.some(n => /Walking back to the hunting spot/.test(n)));
   assert.ok(f.Log.lines.some(entry => /walking in legs/.test(entry.text)), 'the log names the fallback source');
 });
-test('a stuck navdata route re-plans once, then hands over to the leg fallback', async () => {
+test('a stuck navdata route skips two unreachable points, re-plans once, then hands over to the leg fallback', async () => {
   const f = fixture();
   const grid = navGrid(5000, 5000, 15, 1, 200);
   const buffer = navBinary(grid.nodes, grid.edges, { originX: 5000, originZ: 5000 });
@@ -1199,8 +1261,13 @@ test('a stuck navdata route re-plans once, then hands over to the leg fallback',
   assert.equal(f.WalkBack.active.source, 'navdata');
   f.Navigation.next = () => ({ error: 'No walkable route found through the loaded collision map.' });
   f.WalkBack.tick();                                // consume the start waypoint
-  f.advance(1000); f.WalkBack.tick();               // the next hop fails, so re-plan
+  const index = f.WalkBack.active.index;
+  f.advance(1000); f.WalkBack.tick();               // an unreachable waypoint is skipped
+  f.advance(1000); f.WalkBack.tick();               // and the next one
+  assert.equal(f.WalkBack.active.index, index + 2); assert.equal(f.WalkBack.active.navReplans, 0);
+  f.advance(1000); f.WalkBack.tick();               // a third in a row re-plans
   assert.equal(f.WalkBack.active.source, 'navdata'); assert.equal(f.WalkBack.active.navReplans, 1);
+  assert.equal(f.WalkBack.active.skips, 0, 'a new corridor may skip again');
   f.Route.plan = () => null;
   f.advance(21000); f.WalkBack.tick();               // the re-planned start is at the current pose
   f.advance(21000); f.WalkBack.tick();               // no progress now, so the leg fallback takes over
@@ -2953,6 +3020,184 @@ test('town cycle recalls, confirms pet storage and purchases, repairs, reverses 
   assert.equal(commands.filter(c => c.kind === 'travel-gate').length, 1);
   assert.match(f.Town.message, /complete/);
 });
+test('without a reverse scroll the town cycle still runs, skips the statue and walks back to hunt', () => {
+  const f = townFixture(), gp = f.World.gp, commands = f.commands;
+  gp.inventory = gp.inventory.filter(i => i.slot !== 14);
+  f.UI.mount = f.UI.draw = f.UI.update = f.Ticker.start = () => {}; f.boot();
+  const phases = [];
+  let handled = 0;
+  for (let n = 0; n < 200; n++) {
+    f.Controller.tick();
+    if (f.Town.trip) phases.push(f.Town.trip.phase);
+    while (handled < commands.length) {
+      const c = commands[handled++];
+      if (c.kind === 'item-use') {
+        gp.inventory.find(i => i.slot === 13).quantity--;
+        f.bus.emit('phase', 'entering-world'); f.bus.emit('reset');
+        gp.pose.x = 100; f.Navigation.install(navProduct());
+      } else if (c.kind === 'move') gp.pose = { ...c.destination };
+      else if (c.kind === 'select') { gp.target = c.gid; gp.targetCapabilities = {60:4,61:1,62:9,63:0x20000080}[c.gid]; }
+      else if (c.kind === 'storage-open') gp.storage = { npc: c.gid, phase: 'open', capacity: 30, items: [] };
+      else if (c.kind === 'cos-transfer') {
+        const i = f.pet.inventory.find(i => i.slot === c.source);
+        gp.inventory.push({ ...i, slot: c.destination }); f.pet.inventory = f.pet.inventory.filter(i => i.slot !== c.source);
+      } else if (c.kind === 'storage-move') {
+        const i = gp.inventory.find(i => i.slot === c.move.source);
+        gp.storage.items.push({ ...i, slot: c.move.destination }); gp.inventory = gp.inventory.filter(i => i.slot !== c.move.source);
+      } else if (c.kind === 'shop-open') {
+        gp.shop = { npc: c.gid, offers: [{ refObjId: 15, name: 'MP', tab: 0, slot: 0, maxStack: 100, price: '10', previews: [{ refObjId: 15, typeFlags: 4332 }] }] };
+        gp.shopCompletionRevision++;
+      } else if (c.kind === 'cos-shop-sell') f.pet.inventory = f.pet.inventory.filter(i => i.slot !== c.slot);
+      else if (c.kind === 'shop-buy') gp.inventory.find(i => i.refObjId === 15).quantity += c.quantity;
+      else if (c.kind === 'shop-repair') gp.inventory.find(i => i.slot === 6).durability = 10;
+      else if (c.kind === 'npc-close') { gp.target = 0; gp.shop = null; gp.storage = null; }
+    }
+    f.advance(600);
+    if (phases.includes('leave') && !f.Town.trip && !f.WalkBack.active) break;
+  }
+  assert.equal(f.Town.trip, null, f.Town.message);
+  assert.ok(phases.includes('leave'), 'the trip ends with the walk back');
+  assert.equal(phases.some(p => /gate|reverse/.test(p)), false, 'the world statue is not visited');
+  assert.equal(commands.some(c => c.kind === 'travel-gate'), false);
+  assert.equal(commands.some(c => c.kind === 'select' && c.gid === 63), false);
+  assert.equal(f.WalkBack.active, null, 'the walk reached the hunting spot');
+  const center = f.Settings.profile.hunt.center;
+  assert.ok(Math.hypot(gp.pose.x - center.x, gp.pose.z - center.z) <= 12, JSON.stringify(gp.pose));
+  assert.equal(f.Hunt.running, true, 'hunting resumes on arrival');
+});
+test('Back to the hunting spot: Walk needs no world statue, never refills or spends reverse scrolls', () => {
+  const f = townFixture(), c = f.Town.cfg(), gp = f.World.gp;
+  assert.equal(f.botProfile({}).potion.restock.town.returnBy, 'reverse', 'the default keeps the reverse return');
+  assert.equal(f.botProfile({ potion: { restock: { town: { returnBy: 'fly' } } } }).potion.restock.town.returnBy, 'reverse');
+  assert.equal(f.botProfile({ potion: { restock: { town: { returnBy: 'walk' } } } }).potion.restock.town.returnBy, 'walk');
+  c.returnBy = 'walk'; c.gate = null;
+  assert.equal(f.Town.validate(), ''); assert.equal(f.Town.reverses(), false, 'a carried reverse scroll is kept, not used');
+  assert.deepEqual([...f.Town.order(false)], ['storage', 'vendor', 'smith']);
+  assert.equal(f.Town.closeNext('close-smith'), 'leave');
+  f.Town.begin(); f.Town.enter('buy'); gp.inventory.find(i => i.refObjId === 15).quantity = 50; gp.target = 61;
+  gp.inventory = gp.inventory.filter(i => i.slot !== 14);
+  gp.shop = { npc: 61, offers: [{ refObjId: 201, tab: 0, slot: 4, maxStack: 50, price: '50', currency: 1, previews: [{ refObjId: 201, typeFlags: 0x19ec }] }] };
+  f.Town.buy(); assert.equal(f.commands.some(cmd => cmd.kind === 'shop-buy'), false, 'no reverse scroll is bought');
+  assert.equal(f.Town.trip.phase, 'close-vendor');
+});
+test('reverse chosen but none carried: the vendor refill is tried, else the trip walks back instead of stopping', () => {
+  const f = townFixture(), gp = f.World.gp;
+  gp.inventory = gp.inventory.filter(i => i.slot !== 14);
+  assert.equal(f.Town.validate(), ''); assert.equal(f.Town.validate(true), '', 'revival no longer needs a reverse scroll');
+  assert.equal(f.Town.closeNext('close-smith'), 'leave');
+  f.Town.begin(); f.Town.enter('buy'); gp.inventory.find(i => i.refObjId === 15).quantity = 50; gp.target = 61;
+  const offer = { refObjId: 201, tab: 0, slot: 4, maxStack: 50, price: '50', currency: 1, previews: [{ refObjId: 201, typeFlags: 0x19ec }] };
+  gp.shop = { npc: 61, offers: [offer] }; f.Town.buy();
+  assert.equal(f.commands.at(-1).kind, 'shop-buy'); assert.equal(f.commands.at(-1).slot, 4, 'a gold reverse offer is still used');
+  gp.inventory.push({ slot: 14, refObjId: 201, typeFlags: 0x19ec, quantity: 2 });
+  assert.equal(f.Town.closeNext('close-smith'), 'walk-gate', 'with a bought reverse scroll the trip reverses');
+  const g = townFixture(); g.World.gp.inventory = g.World.gp.inventory.filter(i => i.slot !== 14);
+  g.Town.begin(); g.Town.enter('buy'); g.World.gp.inventory.find(i => i.refObjId === 15).quantity = 50; g.World.gp.target = 61;
+  g.World.gp.shop = { npc: 61, offers: [] }; g.Town.buy();
+  assert.ok(g.Town.trip, g.Town.message); assert.equal(g.Town.trip.phase, 'close-vendor', 'no reverse offer is not an error');
+});
+test('the walk back leaves only after the final checks and stops clearly when it cannot start', () => {
+  const ready = f => {
+    const gp = f.World.gp; gp.inventory.find(i => i.refObjId === 15).quantity = 50; gp.inventory.find(i => i.slot === 6).durability = 10;
+    gp.inventory = gp.inventory.filter(i => i.slot !== 14); gp.pose.x = 100; f.Town.begin(); f.Town.enter('leave');
+  };
+  let f = townFixture(); ready(f); f.World.gp.inventory.find(i => i.slot === 6).durability = 5;
+  f.Town.tick(); assert.equal(f.Town.trip, null); assert.equal(f.Hunt.running, false); assert.match(f.Town.message, /Final supply, repair/);
+  f = townFixture(); ready(f); f.World.gp.inventoryPending = true;
+  f.Town.tick(); assert.equal(f.Town.trip.phase, 'leave', 'waits for the inventory to settle');
+  f = townFixture(); ready(f); f.Settings.profile.hunt.center = null;
+  f.Town.tick(); assert.equal(f.Town.trip, null); assert.equal(f.Hunt.running, false); assert.match(f.Town.message, /No saved hunting spot/);
+  f = townFixture(); ready(f); f.World.gp.inventoryPending = false; f.Town.tick();
+  assert.equal(f.Town.trip, null); assert.ok(f.WalkBack.active, f.Town.message); assert.equal(f.WalkBack.active.resume, true);
+  assert.equal(f.Hunt.running, false, 'hunting waits for the arrival'); assert.match(f.Town.message, /walking back to the hunting spot/);
+  assert.ok(f.Town.blocked(), 'no new trip starts during the walk');
+});
+test('resume hunting in town says it walks back when no reverse scroll is carried', () => {
+  const f = townFixture(); f.Hunt.stop(); f.Town.detect = () => ({ key: 'KT' });
+  f.World.gp.inventory = f.World.gp.inventory.filter(i => i.slot !== 14);
+  f.Settings.profile.hunt.center = { regionId: 1, x: 1500, y: 0, z: 100 }; f.World.gp.pose.x = 60;
+  assert.equal(f.Controller.resumeHunting('Back in the game'), 'town');
+  assert.ok(f.Town.trip, f.Town.message); assert.ok(f.notices.some(n => /then walking to the hunting spot/.test(n)), f.notices.join(' | '));
+});
+test('travel plans Hotan to a spot across the western river through the ferry, and walks when it can', () => {
+  const f = fixture(), hotan = { regionId: 23687, x: 844, y: 0, z: 1055 }, spot = { regionId: 22388, x: 1130, y: 0, z: 1730 };
+  const steps = f.Travel.plan(hotan, spot);
+  assert.ok(steps, 'a route exists');
+  assert.equal(steps.map(s => s.kind).join(), 'walk,hop,walk');
+  const hop = steps[1];
+  assert.ok([20, 21].includes(hop.from.id), 'boards a ferry on the Hotan bank (SN_ZONE_25031)');
+  assert.ok([22, 23].includes(hop.to.id), 'lands on the western bank (SN_ZONE_25033)');
+  assert.equal(hop.fee, 500); assert.equal(steps[0].to, hop.from.pose); assert.deepEqual(steps[2].to, spot);
+  f.World.gp.progression.gold = '499';
+  assert.equal(f.Travel.plan(hotan, spot), null, 'an unaffordable ferry is never planned');
+  f.World.gp.progression.gold = '100000';
+  const banned = new Set(['20>22', '20>23', '21>22', '21>23']), detour = f.Travel.plan(hotan, spot, banned);
+  assert.ok(detour, 'another crossing further north is found');
+  assert.equal(detour.some(s => s.kind === 'hop' && banned.has(s.from.id + '>' + s.to.id)), false, 'refused links stay out');
+  assert.ok(detour.filter(s => s.kind === 'hop').length >= 2);
+  assert.equal(f.Travel.begin(hotan, { ...hotan, x: 1500 }, false), false, 'a walkable spot stays a plain walk');
+  f.Settings.profile.hunt.travel = false; assert.equal(f.Travel.begin(hotan, spot, false), false, 'switched off');
+  assert.equal(f.Travel.nodes().get(11).label, 'the Hotan world statue', 'town statues are placed from the town table');
+});
+function travelFixture() {
+  const f = fixture(); f.UI.mount = f.UI.draw = f.UI.update = f.Ticker.start = () => {}; f.boot();
+  const near = { regionId: 1, x: 300, y: 0, z: 100 }, far = { regionId: 5, x: 300, y: 0, z: 100 }, spot = { regionId: 5, x: 900, y: 0, z: 100 };
+  f.Travel.places = new Map([[1, { id: 1, refObjId: 900, label: 'the teleporter', pose: near }], [2, { id: 2, refObjId: 901, label: 'the teleporter', pose: far }]]);
+  f.Travel.links = () => [[1, 2, 500]];
+  f.Travel.walkable = (a, b) => (a.regionId === 5) === (b.regionId === 5);
+  f.Route.setAreas([]);
+  f.World.ents.set(77, { gid: 77, kind: 'npc', refObjId: 900, regionId: 1, x: 310, y: 0, z: 100 });
+  f.Settings.profile.hunt.center = { ...spot };
+  return { ...f, near, far, spot };
+}
+test('travel walks to the teleporter, opens its menu, hops, walks on and resumes hunting', () => {
+  const f = travelFixture(), gp = f.World.gp;
+  f.WalkBack.start(true);
+  assert.ok(f.Travel.active, f.notices.join(' | ')); assert.equal(f.WalkBack.active.label, 'the teleporter');
+  gp.pose = { ...f.near }; f.Controller.tick();
+  assert.equal(f.WalkBack.active, null); assert.equal(f.Travel.active.phase, 'select');
+  f.Controller.tick(); assert.equal(f.commands.at(-1).kind, 'select'); assert.equal(f.commands.at(-1).gid, 77);
+  gp.target = 77; gp.targetCapabilities = 0x80; gp.npcConversation = { gid: 77, phase: 'menu' };
+  f.advance(1000); f.Controller.tick(); f.Controller.tick();
+  const hop = f.commands.find(c => c.kind === 'travel-gate');
+  assert.ok(hop, 'the portal request is sent'); assert.equal(hop.gid, 77); assert.equal(hop.type, 2); assert.equal(hop.target, 2);
+  f.bus.emit('phase', 'entering-world'); assert.ok(f.Travel.active, 'the load screen is expected');
+  f.World.phase = 'world'; gp.pose = { ...f.far }; f.advance(3000); f.Controller.tick();
+  assert.ok(f.WalkBack.active, 'walks on from the landing'); assert.equal(f.WalkBack.active.label, 'the hunting spot');
+  gp.pose = { ...f.spot }; f.Controller.tick();
+  assert.equal(f.Travel.active, null); assert.equal(f.WalkBack.active, null); assert.equal(f.Hunt.running, true);
+});
+test('a refused or unanswered hop is left out; with no other way the trip stops with the reason', () => {
+  let f = travelFixture(), gp = f.World.gp;
+  f.WalkBack.start(true); gp.pose = { ...f.near }; f.Controller.tick(); f.Controller.tick();
+  gp.target = 77; gp.targetCapabilities = 0x80; gp.npcConversation = { gid: 77, phase: 'menu' };
+  f.Controller.tick(); f.Controller.tick(); assert.equal(f.Travel.active.phase, 'arrive');
+  f.bus.emit('notice', { sequence: 1, key: 'UIIT_MSG_INTERACTION_FAIL_NOT_ENOUGH_MONEY' }); f.Controller.tick();
+  assert.equal(f.Travel.active, null); assert.match(f.Travel.message, /not enough gold/); assert.equal(f.Hunt.running, false);
+  f = travelFixture(); gp = f.World.gp;
+  f.WalkBack.start(true); gp.pose = { ...f.near }; f.Controller.tick(); f.Controller.tick();
+  gp.target = 77; gp.targetCapabilities = 0x80; gp.npcConversation = { gid: 77, phase: 'menu' };
+  f.Controller.tick(); f.Controller.tick(); f.advance(16000); f.Controller.tick();
+  assert.equal(f.Travel.active, null); assert.match(f.Travel.message, /no answer from the game/);
+  f = travelFixture(); gp = f.World.gp;
+  f.WalkBack.start(true); gp.pose = { ...f.near }; f.Controller.tick(); f.Controller.tick();
+  gp.target = 77; gp.targetCapabilities = 0x01; f.Controller.tick();
+  assert.equal(f.Travel.active, null); assert.match(f.Travel.message, /offers no teleport/);
+  assert.equal(f.commands.some(c => c.kind === 'travel-gate'), false);
+});
+test('a world change during a travel walk, manual control or Stop end the trip without a hop', () => {
+  let f = travelFixture();
+  f.WalkBack.start(true); f.bus.emit('phase', 'entering-world');
+  assert.equal(f.Travel.active, null); assert.equal(f.WalkBack.active, null); assert.match(f.Travel.message, /unexpected travel/);
+  f = travelFixture(); f.WalkBack.start(true); f.World.gp.pose = { ...f.near }; f.Controller.tick();
+  f.Manual.lastAt = 123; f.Controller.tick(); assert.equal(f.Travel.active, null); assert.match(f.Travel.message, /manual control/);
+  f = travelFixture(); f.WalkBack.start(true); f.World.gp.pose = { ...f.near }; f.Controller.tick();
+  f.toggleBot(); assert.equal(f.Travel.active, null); assert.equal(f.Hunt.running, false);
+  f = travelFixture(); f.WalkBack.start(true);
+  f.AutoStart.entry = { at: 0 }; f.Settings.profile.hunt.autoStart = true; f.AutoStart.tick();
+  assert.equal(f.AutoStart.entry, null, 'auto-start never starts the bot during a trip');
+  assert.ok(f.Travel.active);
+});
 test('abnormal pill restocking uses only the strongest universal pill and preserves existing profiles', () => {
   const f = fixture(), r = f.Restock.cfg();
   assert.equal(r.cure.on, false); assert.equal(r.cure.target, 50);
@@ -3033,7 +3278,7 @@ test('best pills participate in low-stock, full-bag and revival town trips with 
 });
 
 test('town preflight stops before consuming scrolls when setup, scrolls or gold are missing', () => {
-  for (const change of [f => f.Town.cfg().gate = null, f => f.World.gp.inventory = f.World.gp.inventory.filter(i => i.slot !== 14),
+  for (const change of [f => f.Town.cfg().gate = null, f => f.World.gp.inventory = f.World.gp.inventory.filter(i => i.slot !== 13),
       f => f.World.gp.progression.gold = '0']) {
     const f = townFixture(); change(f); f.Town.tick();
     assert.equal(f.Hunt.running, false); assert.equal(f.Town.trip, null);
@@ -4737,7 +4982,9 @@ test('diagnostics show real pet transaction and potion waits plus town refill pr
   t.World.gp.inventory.find(i => i.refObjId === 15).quantity = 650;
   assert.equal(t.Diagnostics.main(), 'Refilling MP: 650 / 1000');
   t.Town.trip = null; t.World.gp.inventory = t.World.gp.inventory.filter(i => i.refObjId !== 201);
-  assert.match(t.Diagnostics.town(), /reverse scroll missing/);
+  assert.doesNotMatch(t.Diagnostics.town(), /blocked/, 'a missing reverse scroll only means walking back');
+  t.World.gp.inventory = t.World.gp.inventory.filter(i => i.refObjId !== 200);
+  assert.match(t.Diagnostics.town(), /return scroll missing/);
 });
 
 test('diagnostic reports omit names, raw errors, chat, locations and sensitive settings', () => {

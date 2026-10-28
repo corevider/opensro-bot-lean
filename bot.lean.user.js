@@ -214,7 +214,7 @@ const DEFAULT_PROFILE = {
     prefer: { hp: 0, mp: 0, vigor: 0, cure: 0 }, delayMs: 350,
     restock: {
       enabled: false, vendor: null, route: [], offers: [],
-      town: { enabled: false, revive: true, deathReturn: 'recall', storeSox: true, sellStar: false, sellBag: false, storeLevels: '', petFull: true, petFree: 1, arrivalRadius: 500,
+      town: { enabled: false, revive: true, deathReturn: 'recall', returnBy: 'reverse', storeSox: true, sellStar: false, sellBag: false, storeLevels: '', petFull: true, petFree: 1, arrivalRadius: 500,
         broken: true, wear: { on: false, pct: 15 }, noXp: { on: false, minutes: 10 }, every: { on: false, minutes: 60 }, arrival: null, storage: null, vendor: null, smith: null, gate: null,
         keep: '', store: { equipment: true, elixirs: true, powders: true, alchemy: true, others: false } },
       hp: { on: true, refObjId: 0, low: 20, target: 100 },
@@ -225,7 +225,7 @@ const DEFAULT_PROFILE = {
     },
   },
   hunt: {
-    center: null, radius: 400, chase: 700, returnToCenter: true,
+    center: null, radius: 400, chase: 700, returnToCenter: true, travel: true,
     classes: { normal: true, champion: true, giant: true, party: false, elite: false, unique: false, titan: false },
     levelMin: 0, levelMax: 0, include: '', exclude: '', priority: 'attackers', avoidKs: true,
     targetTimeoutS: 25,
@@ -261,6 +261,7 @@ function botProfile(input) {
   delete result.potion.restock.town.stacks;
   if (!Number.isInteger(result.potion.delayMs) || result.potion.delayMs < 0 || result.potion.delayMs > 60000) result.potion.delayMs = DEFAULT_PROFILE.potion.delayMs;
   if (!['death', 'recall'].includes(result.potion.restock.town.deathReturn)) result.potion.restock.town.deathReturn = 'recall';
+  if (!['reverse', 'walk'].includes(result.potion.restock.town.returnBy)) result.potion.restock.town.returnBy = 'reverse';
   // New categories inherit the old Other items switch, preserving existing selection.
   const pickup = input.hunt?.pickup;
   for (const key of ['elixirs', 'powders', 'alchemy']) {
@@ -443,6 +444,7 @@ const Hook = {
   nativePost: null,
   NativeWorker: null,
   simUrl: '',
+  assetUrl: '',
   observers: [],
   guards: [], // fn(command) -> true swallows one of the game's own commands
   probe: null,
@@ -502,6 +504,7 @@ function installWorkerHook() {
       super(url, options);
       try {
         const name = options && options.name;
+        if (name === 'sro-assets') Hook.assetUrl = String(url);
         if (name === 'sro-simulation') {
           Hook.simUrl = String(url);
           attachSimulation(this, false);
@@ -5316,7 +5319,11 @@ const Route = {
   areas: typeof NAVDATA_AREAS !== 'undefined' ? NAVDATA_AREAS : [],
   base: typeof NAVDATA_BASE !== 'undefined' ? NAVDATA_BASE : '',
   cache: new Map(), loading: new Map(), dbp: null, loader: null, message: '',
-  setAreas(list) { this.areas = Array.isArray(list) ? list : []; this.cache.clear(); this.loading.clear(); this.message = ''; },
+  // Edges the game's collision does not walk (lean-route-check.js), per area, for this session: 'from>to' both ways.
+  banned: new Map(),
+  setAreas(list) { this.areas = Array.isArray(list) ? list : []; this.cache.clear(); this.loading.clear(); this.banned.clear(); this.message = ''; },
+  bans(name) { if (!this.banned.has(name)) this.banned.set(name, new Set()); return this.banned.get(name); },
+  ban(name, a, b) { this.bans(name).add(a + '>' + b).add(b + '>' + a); },
   setLoader(fn) { this.loader = typeof fn === 'function' ? fn : null; },
   absolute(p) {
     return p ? { x: (p.regionId & 255) * SECTOR + p.x, z: (p.regionId >>> 8) * SECTOR + p.z } : null;
@@ -5482,7 +5489,7 @@ const Route = {
     }
     return best < 0 ? null : { node: best, distance: Math.sqrt(score) };
   },
-  astar(graph, start, goal) {
+  astar(graph, start, goal, banned = null) {
     const count = graph.count, score = new Float64Array(count).fill(Infinity), came = new Int32Array(count).fill(-1);
     const closed = new Uint8Array(count), heap = [];
     const h = i => Math.hypot(graph.x[i] - graph.x[goal], graph.z[i] - graph.z[goal]);
@@ -5529,7 +5536,7 @@ const Route = {
       }
       for (let k = graph.offsets[node]; k < graph.offsets[node + 1]; k++) {
         const next = graph.neighbours[k];
-        if (closed[next]) continue;
+        if (closed[next] || banned?.has(node + '>' + next)) continue;
         const step = Math.hypot(graph.x[next] - graph.x[node], graph.z[next] - graph.z[node]) +
           Math.min(Math.abs(graph.y[next] - graph.y[node]), 200) * .25;
         const value = score[node] + step;
@@ -5564,6 +5571,21 @@ const Route = {
     for (let i = 1; i < points.length; i++) length.value += dist2D(points[i - 1], points[i]);
     return { points, length: length.value };
   },
+  // The corridor, checked against the game's collision first where the asset worker is known (lean-route-check.js).
+  // An edge it cannot walk is banned, so the plan below already goes around it.
+  async checked(from, to) {
+    if (!await this.ensure(from, to)) return null;
+    const meta = this.commonArea(from, to), area = meta && this.cache.get(meta.name);
+    let checked = false;
+    if (area && RouteCheck.available()) {
+      const graph = this.graph(area), here = this.absolute(from), there = this.absolute(to);
+      const start = this.nearest(graph, here.x, here.z), end = this.nearest(graph, there.x, there.z);
+      if (start && end && start.node !== end.node) checked = await RouteCheck.verify(meta.name, graph, start.node, end.node) !== null;
+    }
+    const plan = this.plan(from, to);
+    if (!plan && checked) this.message = 'No corridor in the route data walks on the game map.';
+    return plan;
+  },
   // null means "use the leg fallback"; it is not an error.
   plan(from, to) {
     this.message = '';
@@ -5577,12 +5599,194 @@ const Route = {
     const start = this.nearest(graph, here.x, here.z), end = this.nearest(graph, there.x, there.z);
     if (!start || !end) { this.message = 'No route node near the character or the hunting spot.'; return null; }
     if (start.node === end.node) return null;
-    const path = this.astar(graph, start.node, end.node);
+    const path = this.astar(graph, start.node, end.node, this.banned.get(a.name));
     if (!path) { this.message = 'No walkable path in the route data.'; return null; }
     const thinned = this.thin(graph, path, from.y);
     if (!thinned.points.length) return null;
     return { source: 'navdata', area: a.name, points: thinned.points, length: thinned.length,
       nodes: path.length, snap: Math.max(start.distance, end.distance) };
+  },
+};
+
+
+// Checks a navdata corridor (lean-route.js) against the game's own collision before it is walked.
+// The converted navdata is another map's: here a slope it climbs can be a cliff (Hotan to the Karakoram
+// aircraft dock climbs out of the crater where the rim is a wall). The game's asset worker builds the collision
+// of any region on request, as it does for the region you stand in, and the game's clipper (lean-clipper.js)
+// walks each corridor edge: a straight line first, else a small lattice search. An edge it cannot walk is left
+// out of the area's graph (Route.ban) and the corridor is planned again, until every edge walks or none is left.
+// The asset worker's address is seen when the game starts it (the worker hook) or, when the userscript ran too late
+// for that, read from the page's own bootstrap module, which names it. Without it or the clipper the corridor is
+// walked unchecked, as before, and the log says so.
+const CHECK_CELL = 40;          // lattice cell, and the longest step checked in one clip
+const CHECK_REACH = 60;         // an edge walks when its far end is reached within this
+const CHECK_NODES = 1500;       // lattice search budget for an edge the straight line does not walk
+const CHECK_AROUND = 400;       // the search stays this close to the edge: a longer way round is the graph's to find
+const CHECK_SLICE_MS = 6;       // search time per slice; the game draws between slices
+const CHECK_ROUNDS = 60;        // corridors tried before giving up
+const CHECK_MS = 150000;        // whole check
+const CHECK_REGIONS = 6;        // regions kept in memory
+const CHECK_LOAD_MS = 30000;
+
+const RouteCheck = {
+  worker: null, queue: Promise.resolve(), regions: new Map(), message: '', locating: null,
+  bootstrap() { return W.document?.querySelector?.('script[type="module"][src*="/assets/"]')?.src || ''; },
+  available() { return typeof NativeClipper !== 'undefined' && (!!Hook.assetUrl || !!this.bootstrap()); },
+  locate() {
+    if (Hook.assetUrl) return Promise.resolve(Hook.assetUrl);
+    this.locating ||= (async () => {
+      const src = this.bootstrap();
+      if (!src) return '';
+      const text = await (await W.fetch(src, { credentials: 'same-origin' })).text();
+      const found = text.match(/new\s+Worker\(\s*new\s+URL\(\s*["']([^"']+)["'][^)]*\)\s*,\s*\{[^}]*name\s*:\s*["']sro-assets["']/);
+      if (found) Hook.assetUrl = new URL(found[1], src).href;
+      return Hook.assetUrl;
+    })().catch(() => '').finally(() => { this.locating = null; });
+    return this.locating;
+  },
+  // One region's collision, as the game's asset worker builds it (its 3x3 window), with a clipper installed on it.
+  region(regionId) {
+    if (this.regions.has(regionId)) {
+      const hit = this.regions.get(regionId);
+      this.regions.delete(regionId); this.regions.set(regionId, hit);
+      return hit;
+    }
+    const job = this.load(regionId).then(product => {
+      if (!product?.complete || product.regionId !== regionId) return null;
+      const clipper = NativeClipper.createNavigation();
+      clipper.install(product.regionId, product);
+      return { regionId, clipper };
+    }).catch(() => null);
+    this.regions.set(regionId, job);
+    while (this.regions.size > CHECK_REGIONS) this.regions.delete(this.regions.keys().next().value);
+    return job;
+  },
+  // One request at a time: the worker's replies carry no request this code could match.
+  load(regionId) {
+    const job = this.queue.then(() => new Promise((resolve, reject) => {
+      const worker = this.worker ||= new (Hook.NativeWorker || W.Worker)(Hook.assetUrl, { type: 'module', name: 'nix-collision' });
+      const timer = setTimeout(() => done(null, Error('Region collision timed out.')), CHECK_LOAD_MS);
+      const done = (product, error) => {
+        clearTimeout(timer); worker.onmessage = null; worker.onerror = null;
+        if (error) { worker.terminate(); if (this.worker === worker) this.worker = null; reject(error); } else resolve(product);
+      };
+      worker.onmessage = e => {
+        if (e.data?.kind === 'navigation') done(e.data.product);
+        else if (e.data?.kind === 'error') done(null, Error(String(e.data.error)));
+      };
+      worker.onerror = () => done(null, Error('Region collision worker failed.'));
+      const path = '/assets/world/outdoor/regions/region-' + regionId.toString(16).padStart(4, '0') + '.json#' + regionId;
+      worker.postMessage({ kind: 'request', id: 1, url: new URL(path, W.location.href).href, decode: 'navigation', limit: 128 << 20 });
+    }));
+    this.queue = job.catch(() => {});
+    return job;
+  },
+  release() {
+    this.regions.clear();
+    this.worker?.terminate(); this.worker = null;
+  },
+  // Every edge of the corridor from start to goal walks, or false when no corridor does; null when the check could
+  // not run. Bans stay for the area.
+  async verify(area, graph, start, goal) {
+    if (!await this.locate()) {
+      Log.warn('Route check (beta): the game\'s asset loader was not found, so the route data is walked unchecked.');
+      return null;
+    }
+    const walks = new Set(), deadline = now() + CHECK_MS, before = Route.bans(area).size / 2;
+    let unknown = 0, result = false;
+    try {
+      for (let round = 0; round < CHECK_ROUNDS && now() < deadline; round++) {
+        const path = Route.astar(graph, start, goal, Route.bans(area));
+        if (!path) break;
+        let blocked = false;
+        for (let i = 0; i + 1 < path.length && now() < deadline; i++) {
+          const u = path[i], v = path[i + 1];
+          if (walks.has(u + '>' + v)) continue;
+          this.message = 'checking the route against the game map (' + (i + 1) + '/' + (path.length - 1) + ')';
+          const walk = await this.edge(graph, u, v);
+          if (walk === false) { Route.ban(area, u, v); blocked = true; break; }
+          if (walk === null) unknown++;
+          walks.add(u + '>' + v);
+        }
+        if (!blocked) { result = now() < deadline; break; }
+      }
+      const left = Route.bans(area).size / 2 - before;
+      Log.info('Route check (beta): ' + (result ? 'the corridor walks on the game map' : 'no corridor walks on the game map') +
+        (left ? '; ' + left + ' step' + (left === 1 ? '' : 's') + ' left out' : '') + (unknown ? '; ' + unknown + ' without collision data' : '') + '.');
+      return result;
+    } finally { this.message = ''; this.release(); }
+  },
+  // true walks, false is blocked, null is unknown (no collision for that region): an unknown edge is walked as before.
+  async edge(graph, u, v) {
+    const from = Route.pose(graph.x[u], graph.z[u], graph.y[u]), to = Route.pose(graph.x[v], graph.z[v], graph.y[v]);
+    if (!from || !to) return null;
+    const region = await this.region(from.regionId);
+    if (!region) return null;
+    const c = region.clipper, origin = from.regionId;
+    const rel = p => [((p.regionId & 255) - (origin & 255)) * SECTOR + p.x, ((p.regionId >>> 8 & 127) - (origin >>> 8 & 127)) * SECTOR + p.z];
+    const at = (x, z, y) => {
+      const rx = Math.floor(x / SECTOR), rz = Math.floor(z / SECTOR);
+      return { regionId: ((origin >>> 8 & 127) + rz) << 8 | (origin & 255) + rx, x: x - rx * SECTOR, y, z: z - rz * SECTOR };
+    };
+    const step = (pose, x, z) => {
+      const got = c.clip({ ...pose, angle: 0 }, { ...at(x, z, pose.y), angle: 0 }, { slide: false });
+      if (!got) return null;
+      const [gx, gz] = rel(got);
+      return Math.hypot(gx - x, gz - z) <= 2 ? got : null;
+    };
+    const start = c.surface(from);
+    if (!c.available(start)) return null;
+    const [sx, sz] = rel(start), [tx, tz] = rel(to);
+    // The straight line, in steps of at most one cell.
+    const n = Math.max(1, Math.ceil(Math.hypot(tx - sx, tz - sz) / CHECK_CELL));
+    let pose = start;
+    for (let i = 1; i <= n && pose; i++) pose = step(pose, sx + (tx - sx) * i / n, sz + (tz - sz) * i / n);
+    if (pose) return true;
+    // A lattice search around whatever stands in the way, in slices.
+    const search = this.search(step, rel, start, tx, tz);
+    for (;;) {
+      const started = performance.now();
+      let result;
+      while ((result = search.next()).done === false && performance.now() - started < CHECK_SLICE_MS);
+      if (result.done) return result.value;
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  },
+  *search(step, rel, start, gx, gz) {
+    const key = (i, j, y) => i + ',' + j + ',' + Math.round(y / 12), h = (i, j) => Math.hypot(i * CHECK_CELL - gx, j * CHECK_CELL - gz);
+    const [sx, sz] = rel(start), mx = (sx + gx) / 2, mz = (sz + gz) / 2;
+    const near = (a, b) => Math.hypot(a * CHECK_CELL - mx, b * CHECK_CELL - mz) <= CHECK_AROUND;
+    let i0 = Math.round(sx / CHECK_CELL), j0 = Math.round(sz / CHECK_CELL), first = null;
+    // A corridor node can stand on a rock edge: join the lattice at any corner around it.
+    for (const [di, dj] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+      first = step(start, (i0 + di) * CHECK_CELL, (j0 + dj) * CHECK_CELL);
+      if (first) { i0 += di; j0 += dj; break; }
+    }
+    if (!first) return false;
+    const heap = [{ i: i0, j: j0, g: 0, f: h(i0, j0), pose: first }], closed = new Set(), scores = new Map();
+    let expanded = 0;
+    while (heap.length && expanded < CHECK_NODES) {
+      yield;
+      let m = 0;
+      for (let k = 1; k < heap.length; k++) if (heap[k].f < heap[m].f) m = k;
+      const node = heap[m];
+      heap[m] = heap[heap.length - 1]; heap.pop();
+      const k = key(node.i, node.j, node.pose.y);
+      if (closed.has(k)) continue;
+      closed.add(k); expanded++;
+      if (h(node.i, node.j) <= CHECK_REACH) return true;
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+        const a = node.i + di, b = node.j + dj;
+        if (!near(a, b)) continue;
+        const pose = step(node.pose, a * CHECK_CELL, b * CHECK_CELL);
+        if (!pose) continue;
+        const kk = key(a, b, pose.y), cost = node.g + CHECK_CELL * Math.hypot(di, dj);
+        if (closed.has(kk) || (scores.get(kk) ?? Infinity) <= cost) continue;
+        scores.set(kk, cost);
+        heap.push({ i: a, j: b, g: cost, f: cost + 1.5 * h(a, b), pose });
+      }
+    }
+    return false;
   },
 };
 
@@ -5599,6 +5803,8 @@ const WALK_MAX_LEGS = 60;        // hard safety cap on chained legs for one retu
 const WALK_MAX_MS = 30 * 60000;  // hard safety cap for the leg fallback
 const WALK_NAV_MS = 90 * 60000;  // absolute cap for a navdata route
 const WALK_PLAN_MS = 6000;       // wait this long for route data before falling back
+const WALK_NAV_REACH = 60;       // a navdata waypoint is passed within this: it may stand on a rock edge
+const WALK_NAV_SKIPS = 2;        // unreachable navdata waypoints skipped in a row before re-planning
 
 const WalkBack = {
   active: null,
@@ -5625,6 +5831,8 @@ const WalkBack = {
       if (nearest >= 0) route = recorded.slice(nearest).map(p => ({ ...p }));
     }
     route.push({ ...dest });
+    // Across water or between unconnected areas: teleports and ferries (lean-travel.js) take over.
+    if (Travel.begin(pose, dest, shouldResume)) return;
     this.launch(dest, route, pose, shouldResume);
   },
   // Walk anywhere, not just to the hunting spot (Trade uses this between towns). The caller owns the safety checks
@@ -5655,17 +5863,17 @@ const WalkBack = {
     const navWorth = distance > WALK_LEG && !!routeArea &&
       !(pose.regionId & DUNGEON) && !(dest.regionId & DUNGEON);
     if (!navWorth) return this.useLegs();
+    // With the game's asset worker the corridor is checked against the real collision first (lean-route-check.js).
+    const check = RouteCheck.available();
     let planned = null;
-    try { planned = Route.plan(pose, dest); } catch { planned = null; }
+    if (!check) { try { planned = Route.plan(pose, dest); } catch { planned = null; } }
     if (planned) return this.useNav(planned, pose);
     const a = this.active, token = {};
-    a.plan = { at: now(), token };
+    a.plan = { at: now(), token, limit: check ? CHECK_MS + 5000 : WALK_PLAN_MS };
     a.source = 'planning';
-    Log.info('Route: loading navdata for ' + routeArea.name + '.');
-    Route.ensure(pose, dest).then(ok => {
+    Log.info('Route: loading navdata for ' + routeArea.name + (check ? ' and checking it against the game map.' : '.'));
+    Route.checked(pose, dest).then(next => {
       if (this.active !== a || a.plan?.token !== token) return;
-      let next = null;
-      try { next = ok ? Route.plan(World.pose(), dest) : null; } catch { next = null; }
       if (next) this.useNav(next, World.pose());
       else this.useLegs();
     }, () => {
@@ -5689,7 +5897,7 @@ const WalkBack = {
     a.source = 'navdata';
     a.routeArea = route.area;
     a.routeLength = route.length + (dist2D(route.points[route.points.length - 1], a.destination) || 0);
-    a.index = 0; a.travel = null; a.leg = null; a.legTries = 0;
+    a.index = 0; a.skips = 0; a.travel = null; a.leg = null; a.legTries = 0;
     a.progressAt = now(); a.lastPose = { ...pose }; a.best = dist2D(pose, a.destination); a.bestAt = now();
     a.maxMs = Math.max(WALK_MAX_MS, Math.min(WALK_NAV_MS, a.routeLength / 20 * 1000 * 2));
     a.plan = null;
@@ -5706,7 +5914,7 @@ const WalkBack = {
       return false;
     }
     a.route = a.legRoute; a.recorded = a.legRecorded; a.source = 'legs';
-    a.index = 0; a.travel = null; a.leg = null; a.legTries = 0;
+    a.index = 0; a.skips = 0; a.travel = null; a.leg = null; a.legTries = 0;
     a.totalLegs = Math.max(1, Math.ceil(a.distance / WALK_LEG)); a.legs = 0;
     a.maxMs = WALK_MAX_MS; a.plan = null;
     a.progressAt = now(); a.lastPose = { ...pose }; a.best = dist2D(pose, a.destination); a.bestAt = now();
@@ -5723,7 +5931,7 @@ const WalkBack = {
     try { route = Route.plan(pose, a.destination); } catch { return false; }
     if (!route?.points?.length) return false;
     a.route = [...route.points.map(p => ({ ...p })), { ...a.destination }];
-    a.index = 0; a.travel = null; a.leg = null; a.legTries = 0;
+    a.index = 0; a.skips = 0; a.travel = null; a.leg = null; a.legTries = 0;
     a.progressAt = now(); a.lastPose = { ...pose }; a.best = dist2D(pose, a.destination); a.bestAt = now();
     Log.info('Route: re-planned from the current position with ' + route.points.length + ' waypoints.');
     return true;
@@ -5732,7 +5940,7 @@ const WalkBack = {
   status() {
     const a = this.active;
     if (!a) return '';
-    if (a.source === 'planning') return 'Walking to ' + a.label + ': loading route data.';
+    if (a.source === 'planning') return 'Walking to ' + a.label + ': ' + (RouteCheck.message || 'loading route data') + '.';
     const left = dist2D(World.pose(), a.destination);
     const progress = Number.isFinite(left) && a.distance ? ' · ' + Math.round(left / 10) + ' m left' : '';
     if (a.source === 'navdata') {
@@ -5762,15 +5970,16 @@ const WalkBack = {
     if (!World.inWorld() || World.isDead()) return this.cancel('Walk back interrupted.', false);
     if (Manual.lastAt !== a.manualAt) return this.cancel('Manual control: walk back cancelled.', false);
     if (a.source === 'planning') {
-      if (now() - a.plan.at <= WALK_PLAN_MS) return;
+      if (now() - a.plan.at <= (a.plan.limit || WALK_PLAN_MS)) return;
       if (!this.useLegs()) return;
     }
     if (!a.route?.length) return;
     const pose = World.pose(), dest = a.route[a.index], distance = dist2D(pose, dest);
     if (!Number.isFinite(distance)) return this.cancel('Cannot walk to the saved hunting spot.');
     // Only the last point may use the caller's wider arrival radius; waypoints on the way stay tight.
-    if (distance <= (a.index >= a.route.length - 1 ? a.stop : 12)) {
-      a.index++; a.leg = null; a.legTries = 0; a.progressAt = now(); a.lastPose = { ...pose }; a.travel = null;
+    const last = a.index >= a.route.length - 1;
+    if (distance <= (last ? a.stop : a.source === 'navdata' ? WALK_NAV_REACH : 12)) {
+      a.index++; a.skips = 0; a.leg = null; a.legTries = 0; a.progressAt = now(); a.lastPose = { ...pose }; a.travel = null;
       if (a.index < a.route.length) return;
       this.active = null;
       if (a.onDone) return a.onDone();
@@ -5816,8 +6025,16 @@ const WalkBack = {
     }
     // A leg end only gives the direction: its neighbourhood will do, which spares
     // searching for a point that may lie on a slope or a rock.
-    const move = a.leg ? Navigation.next(a, a.leg.target, a.recorded, WALK_LEG_REACH, true) : Navigation.next(a, dest, a.recorded);
+    // The last point may stand on something solid (an NPC): its stop radius is reach enough. A navdata waypoint only
+    // gives the way: its neighbourhood will do.
+    const waypoint = !last && a.source === 'navdata', reach = waypoint ? WALK_NAV_REACH : last && a.stop > 12 ? a.stop : 0;
+    const move = a.leg ? Navigation.next(a, a.leg.target, a.recorded, WALK_LEG_REACH, true) : Navigation.next(a, dest, a.recorded, reach, reach > 0);
     if (move.error && !move.waiting) {
+      if (waypoint && (a.skips || 0) < WALK_NAV_SKIPS) {
+        a.skips = (a.skips || 0) + 1; a.index++; a.travel = null; a.progressAt = now();
+        Log.info('Walk back: a route point is out of reach; going on to the next one.');
+        return;
+      }
       if (a.source === 'navdata') {
         if (this.replan(pose)) return;
         if (this.useLegs()) return;
@@ -6775,6 +6992,7 @@ const TOWN_TABLE = [{"key":"EU","name":"Constantinople","arrival":{"regionId":26
 
 
 // Town service owns the whole recall -> warehouse -> shop -> smith -> reverse trip.
+// Without a reverse scroll (or with Back to the hunting spot: Walk) the trip ends after the services and WalkBack walks back.
 // Native travel-gate type 5 spends the reverse scroll: choice 2 recalls, choice 3 returns to death.
 // See OpenSRO action/reversereturn.go, 6FEF10 and 5DA1B0's choice rows.
 const TOWN_REVERSE = { recall: 2, death: 3 };
@@ -7098,12 +7316,15 @@ const Town = {
   restartClocks() { this.lastXpAt = this.cycleFrom = now(); },
   // Already standing in a known town (all four services in range): no return scroll is needed or wanted.
   inTown(revival = false) { return !revival && !!World.pose() && !!this.detect(World.pose()); },
+  // The way back after the services: the reverse scroll when that is the choice and one is carried, otherwise a walk.
+  walks() { return this.cfg().returnBy === 'walk'; },
+  reverses() { return !this.walks() && !!this.scroll(0x19ec); },
   validate(revival = false) {
     const c = this.cfg(), supplies = this.supplies();
-    const missing = [['arrival', 'arrival point'], ['vendor', 'potion merchant'], ['smith', 'repair merchant'], ['gate', 'world statue / teleport'], ...(c.petFull ? [['storage', 'warehouse']] : [])].filter(([key]) => !c[key]).map(([, label]) => label);
+    const missing = [['arrival', 'arrival point'], ['vendor', 'potion merchant'], ['smith', 'repair merchant'], ...(this.walks() ? [] : [['gate', 'world statue / teleport']]), ...(c.petFull ? [['storage', 'warehouse']] : [])].filter(([key]) => !c[key]).map(([, label]) => label);
     if (missing.length) return 'Save missing town services: ' + missing.join(', ') + '.';
     if (!supplies.length || supplies.some(s => !s.refObjId || !Number.isInteger(s.low) || !Number.isInteger(s.target) || s.low < 0 || s.target <= s.low || s.target > 10000)) return 'Choose potions and valid low-stock/refill quantities.';
-    if ((!revival && !this.inTown() && !this.scroll(0x09ec)) || !this.scroll(0x19ec)) return revival ? 'Carry a reverse return scroll for revival return.' : 'Carry a return scroll and a reverse return scroll before hunting.';
+    if (!revival && !this.inTown() && !this.scroll(0x09ec)) return 'Carry a return scroll before hunting.';
     if (toBigInt(World.gp.progression?.gold ?? 0) <= 0n) return 'Carry gold for potions, storage and repairs.';
     return '';
   },
@@ -7136,6 +7357,7 @@ const Town = {
     const inTown = this.inTown(revival);
     const origin = revival || inTown ? (reverseChoice === TOWN_REVERSE.death ? this.deathPoint || Hunt.cfg().center : this.lastScrollPoint || Hunt.cfg().center) : World.pose();
     if (!origin) return this.fail(inTown ? 'No saved hunting point to return to; set the hunting area first.' : 'No saved hunting point for revival return.');
+    if (!this.walks() && !this.scroll(0x19ec)) Log.info('No reverse return scroll: unless one is bought in town, the trip walks back to the hunting spot after the services.');
     if (revival) Hunt.running = true;
     Restock.trip = null;
     Resurrect.cancelTrip('', true); Resurrect.holdUntil = 0; Loot.suspend();
@@ -7174,12 +7396,26 @@ const Town = {
   order(full) {
     const sellFirst = this.trip?.sellFirst;
     const order = !sellFirst ? ['storage', 'vendor', 'smith', 'gate'] : full ? ['smith', 'storage', 'vendor', 'gate'] : ['storage', 'smith', 'vendor', 'gate'];
-    return this.cfg().storage ? order : order.filter(role => role !== 'storage');
+    return order.filter(role => (role !== 'storage' || this.cfg().storage) && (role !== 'gate' || !this.walks()));
   },
-  // The service to walk to after closing a window.
+  // The service to walk to after closing a window. After the last one: the world statue to reverse, or the walk back
+  // when no reverse scroll is carried (none was bought in town either).
   closeNext(phase) {
-    const order = this.trip?.order || this.order(false), role = phase.replace(/^close-/, '');
-    return 'walk-' + (order[order.indexOf(role) + 1] || 'gate');
+    const order = this.trip?.order || this.order(false), role = phase.replace(/^close-/, ''), next = order[order.indexOf(role) + 1] || 'gate';
+    return next === 'gate' && !this.reverses() ? 'leave' : 'walk-' + next;
+  },
+  // Walk back instead of reversing: the trip ends here and WalkBack, which resumes hunting on arrival, takes over.
+  leave() {
+    const t = this.trip, gp = World.gp;
+    if (gp.inventoryPending || World.isCasting()) return;
+    if (t.supplies.some(s => Restock.count(s.refObjId) < s.target) || this.damaged().length || !t.revival && !this.scroll(0x09ec)) return this.fail('Final supply, repair or travel-scroll check failed.');
+    if (World.freeBagSlots() <= 1) return this.fail('Returned to town; free at least two character bag slots before hunting again.');
+    if (!Hunt.cfg().center) return this.fail('No saved hunting spot to walk back to.');
+    this.trip = null; Hunt.targetGid = Hunt.lootGid = 0; this.restartClocks();
+    WalkBack.start(true);
+    if (!WalkBack.active && !Travel.active) { this.message = 'Town cycle stopped: the walk back to the hunting spot did not start.'; Hunt.stop(this.message); return; }
+    this.message = 'Town service complete; walking back to the hunting spot.';
+    Log.info(this.message); UI.toast(this.message);
   },
   enter(phase) {
     const t = this.trip;
@@ -7385,15 +7621,16 @@ const Town = {
     t.buySkipped ||= [];
     let s = t.supplies.find(s => !t.buySkipped.includes(s.refObjId) && Restock.count(s.refObjId) < s.target);
     if (!s) {
-      // Refill held travel scrolls from gold offers only. Never buy from Item Mall.
-      for (const type of [0x09ec, 0x19ec]) {
+      // Refill held travel scrolls from gold offers only. Never buy from Item Mall. A missing reverse scroll is not an
+      // error: the trip walks back instead.
+      for (const type of this.walks() ? [0x09ec] : [0x09ec, 0x19ec]) {
         const count = World.items().filter(i => (i.typeFlags & 0xfffc) === type).reduce((n, i) => n + (i.quantity ?? 1), 0);
         if (count >= 2) continue;
         const offer = shop.offers.find(o => (o.currency === undefined || o.currency === 1) &&
           (o.items || o.previews || []).some(i => i.refObjId === o.refObjId && (i.typeFlags & 0xfffc) === type) &&
           (!o.contents?.length || o.contents.length === 1 && o.contents[0].refObjId === o.refObjId && o.contents[0].quantity === 1));
         if (offer) { s = { kind: 'scroll', refObjId: offer.refObjId, target: Restock.count(offer.refObjId) + 2 - count }; break; }
-        if (!count) return this.fail('Travel scrolls unavailable at this merchant. Carry spares.');
+        if (!count && type === 0x09ec) return this.fail('Travel scrolls unavailable at this merchant. Carry spares.');
       }
     }
     if (!s) { this.enter('close-vendor'); return; }
@@ -7545,6 +7782,7 @@ const Town = {
     else if (t.phase === 'sell') this.sell();
     else if (t.phase === 'ammo') this.ammo();
     else if (t.phase === 'repair') this.repair();
+    else if (t.phase === 'leave') this.leave();
     else if (t.phase.startsWith('close-')) {
       if (now() - t.at > 15000) this.fail('NPC window did not close.');
       else this.close(this.closeNext(t.phase));
@@ -7565,6 +7803,187 @@ const Town = {
     return true;
   },
 };
+
+
+// Generated by gen-travel.py from the client's teleportData.json and npcpos.json. Do not edit by hand.
+const TRAVEL_TABLE = {"nodes":[{"id":1,"refObjId":2094,"name":"SN_ZONE_22001"},{"id":2,"refObjId":2095,"name":"SN_ZONE_22002"},{"id":3,"refObjId":2011,"name":"SN_ZONE_21002","regionId":24993,"x":362.3,"y":72.48,"z":1761.33},{"id":4,"refObjId":2119,"name":"SN_ZONE_21003","regionId":24734,"x":330.34,"y":61.89,"z":1606.66},{"id":5,"refObjId":2031,"name":"SN_ZONE_13002","regionId":25000,"x":1009.54,"y":0.0,"z":1902.64},{"id":6,"refObjId":2034,"name":"SN_ZONE_14022","regionId":25001,"x":1387.17,"y":-0.07,"z":1765.02},{"id":7,"refObjId":2037,"name":"SN_ZONE_14031","regionId":25000,"x":930.07,"y":-0.41,"z":30.66},{"id":8,"refObjId":2035,"name":"SN_ZONE_14025","regionId":25255,"x":334.99,"y":-0.28,"z":34.18},{"id":9,"refObjId":2056,"name":"SN_ZONE_21004","regionId":25761,"x":513.16,"y":89.61,"z":1281.35},{"id":10,"refObjId":2120,"name":"SN_ZONE_21005","regionId":25244,"x":919.72,"y":69.37,"z":366.88},{"id":11,"refObjId":2096,"name":"SN_ZONE_22003"},{"id":12,"refObjId":2046,"name":"SN_ZONE_25022","regionId":24999,"x":647.53,"y":15.92,"z":367.55},{"id":13,"refObjId":2197,"name":"SN_ZONE_25022"},{"id":16,"refObjId":3826,"name":"SN_ZONE_25029_2","regionId":23436,"x":1189.4,"y":-22.49,"z":1324.57},{"id":17,"refObjId":3827,"name":"SN_ZONE_25029_1","regionId":23180,"x":1644.16,"y":-32.06,"z":752.79},{"id":18,"refObjId":3824,"name":"SN_ZONE_25028_2","regionId":23439,"x":323.36,"y":17.89,"z":1747.85},{"id":19,"refObjId":3825,"name":"SN_ZONE_25028_1","regionId":23183,"x":275.92,"y":-25.64,"z":888.49},{"id":20,"refObjId":5901,"name":"SN_ZONE_25031_1","regionId":24185,"x":615.54,"y":2134.74,"z":27.1},{"id":21,"refObjId":5902,"name":"SN_ZONE_25031_2","regionId":22137,"x":851.51,"y":2064.43,"z":1033.44},{"id":22,"refObjId":5910,"name":"SN_ZONE_25033_1","regionId":24438,"x":1120.72,"y":2552.81,"z":313.19},{"id":23,"refObjId":5911,"name":"SN_ZONE_25033_2","regionId":22134,"x":919.97,"y":2545.55,"z":1902.6},{"id":24,"refObjId":19071,"name":"SN_ZONE_25033_3","regionId":24424,"x":1661.63,"y":3892.83,"z":582.68},{"id":25,"refObjId":19074,"name":"SN_ZONE_22004"},{"id":26,"refObjId":7524,"name":"SN_ZONE_21009","regionId":25163,"x":958.05,"y":-155.04,"z":98.97},{"id":27,"refObjId":7522,"name":"SN_ZONE_25022","regionId":26704,"x":652.34,"y":-27.6,"z":1690.06},{"id":28,"refObjId":7526,"name":"SN_ZONE_14043","regionId":27471,"x":1349.25,"y":82.7,"z":412.72},{"id":29,"refObjId":19519,"name":"SN_ZONE_11043","regionId":26959,"x":568.86,"y":83.63,"z":1116.58},{"id":30,"refObjId":19072,"name":"SN_ZONE_14044","regionId":26957,"x":1650.2,"y":83.87,"z":1332.48},{"id":31,"refObjId":7527,"name":"SN_ZONE_21007","regionId":26457,"x":1330.52,"y":26.27,"z":908.75},{"id":32,"refObjId":7528,"name":"SN_ZONE_21008","regionId":25945,"x":1323.33,"y":26.93,"z":999.61},{"id":33,"refObjId":7529,"name":"SN_ZONE_25033_4","regionId":24934,"x":1503.91,"y":626.55,"z":70.9},{"id":34,"refObjId":19075,"name":"SN_ZONE_22005"},{"id":35,"refObjId":7545,"name":"SN_ZONE_25044_03","regionId":27000,"x":1195.11,"y":598.15,"z":1826.79},{"id":36,"refObjId":7546,"name":"SN_ZONE_25044_04","regionId":26232,"x":1489.76,"y":185.39,"z":1842.94},{"id":37,"refObjId":7547,"name":"SN_ZONE_25033_5","regionId":25975,"x":1368.73,"y":324.81,"z":1335.88},{"id":38,"refObjId":7548,"name":"SN_ZONE_25044_01","regionId":26237,"x":158.16,"y":393.61,"z":614.88},{"id":39,"refObjId":7549,"name":"SN_ZONE_25044_02","regionId":25469,"x":183.18,"y":256.87,"z":437.25},{"id":40,"refObjId":23285,"name":"SN_ZONE_40008"},{"id":41,"refObjId":23286,"name":"SN_ZONE_40000"},{"id":42,"refObjId":23287,"name":"SN_ZONE_40009"},{"id":43,"refObjId":22574,"name":"SN_ZONE_41008"},{"id":44,"refObjId":22575,"name":"SN_ZONE_41009"},{"id":45,"refObjId":22576,"name":"SN_ZONE_41010"},{"id":46,"refObjId":22577,"name":"SN_ZONE_41004"},{"id":47,"refObjId":22578,"name":"SN_ZONE_41005"},{"id":48,"refObjId":22579,"name":"SN_ZONE_41006"}],"links":[[1,2,5000],[2,1,5000],[2,11,5000],[3,9,500],[4,10,500],[5,6,10],[5,7,10],[5,8,10],[6,5,10],[6,7,10],[6,8,10],[7,5,10],[7,6,10],[7,8,10],[8,5,10],[8,6,10],[8,7,10],[9,3,500],[10,4,500],[11,2,5000],[11,34,5000],[12,13,0],[16,18,500],[17,19,500],[18,16,500],[19,17,500],[20,22,500],[20,23,500],[20,37,500],[21,22,500],[21,23,500],[22,20,500],[22,21,500],[22,37,500],[23,20,500],[23,21,500],[24,33,500],[25,34,5000],[26,31,500],[26,32,500],[27,13,0],[28,29,10],[28,30,10],[29,28,10],[29,30,10],[30,28,10],[30,29,10],[31,26,500],[32,26,500],[33,24,500],[34,11,5000],[34,25,5000],[35,38,500],[36,39,500],[37,20,500],[37,22,500],[38,35,500],[39,36,500],[40,43,0],[40,44,0],[40,45,0],[41,43,0],[41,44,0],[41,45,0],[42,43,0],[42,44,0],[42,45,0],[43,40,0],[43,41,0],[43,42,0],[44,40,0],[44,41,0],[44,42,0],[45,40,0],[45,41,0],[45,42,0],[46,47,0],[46,48,0],[47,46,0],[47,48,0],[48,1,0],[48,46,0],[48,47,0]]};
+
+
+// Teleporters and ferries for a walk that cannot be made on foot (lean-travel-data.js). The route areas
+// (lean-route.js) say where walking connects; a teleport or ferry link joins two places for its fee. Every walk
+// between them is still a WalkBack walk, and each hop is the game's own portal menu: select the teleporter, wait for
+// its menu, send travel-gate type 2 with the destination's teleport id, and confirm the arrival.
+const TRAVEL_HOP = 3000;        // a hop (menu and load screen) weighs like this much walking
+const TRAVEL_WALK = 1.3;        // a walk is longer than the straight line
+const TRAVEL_REACH = 150;       // stop this close to the teleporter: it stands on a dock or a ship; the game talks within 20 m
+const TRAVEL_FIND = 300;        // the teleporter stands within this of its table position
+const TRAVEL_STEP_MS = 15000;   // selecting, the menu, and the hop starting
+const TRAVEL_ARRIVE_MS = 90000;
+const TRAVEL_LAND = 900;        // the arrival lands within this of the destination teleporter
+const TRAVEL_REPLANS = 3;
+const TRAVEL_PORTAL = 0x80;     // target capability: the teleport menu
+
+const Travel = {
+  active: null, message: '', places: null,
+  on() { return Settings.profile.hunt.travel !== false; },
+  // Teleporters with a known position. Town world statues are buildings: their position comes from the town table.
+  nodes() {
+    if (this.places) return this.places;
+    const gates = new Map((typeof TOWN_TABLE !== 'undefined' ? TOWN_TABLE : []).map(t => [t.services.gate?.refObjId, { town: t.name, ...t.services.gate }]));
+    this.places = new Map();
+    for (const row of typeof TRAVEL_TABLE !== 'undefined' ? TRAVEL_TABLE.nodes : []) {
+      const gate = gates.get(row.refObjId), at = Number.isInteger(row.regionId) ? row : gate;
+      if (!at) continue;
+      this.places.set(row.id, { id: row.id, refObjId: row.refObjId, label: gate ? 'the ' + gate.town + ' world statue' : 'the teleporter',
+        pose: { regionId: at.regionId, x: at.x, y: at.y, z: at.z } });
+    }
+    return this.places;
+  },
+  links() { return typeof TRAVEL_TABLE !== 'undefined' ? TRAVEL_TABLE.links : []; },
+  walkable(a, b) {
+    const d = dist2D(a, b);
+    return Number.isFinite(d) && (d <= WALK_LEG || !!Route.commonArea(a, b));
+  },
+  // Cheapest mix of walks and hops (Dijkstra over the start, the goal and every teleporter). Steps alternate between
+  // { kind: 'walk', to } and { kind: 'hop', from, to, fee }; null when no mix reaches the goal.
+  plan(from, to, banned = new Set()) {
+    if (!from || !to || ((from.regionId | to.regionId) & DUNGEON)) return null;
+    const nodes = [...this.nodes().values()], gold = toBigInt(World.gp?.progression?.gold ?? 0);
+    const points = [{ pose: from }, { pose: to }, ...nodes.map(node => ({ pose: node.pose, node }))];
+    const index = new Map(nodes.map((node, i) => [node.id, i + 2])), hops = new Map();
+    for (const [source, destination, fee] of this.links()) {
+      if (!index.has(source) || !index.has(destination) || banned.has(source + '>' + destination) || BigInt(fee) > gold) continue;
+      if (!hops.has(source)) hops.set(source, []);
+      hops.get(source).push({ destination, fee });
+    }
+    const cost = points.map(() => Infinity), came = [], done = [];
+    cost[0] = 0;
+    for (;;) {
+      let i = -1;
+      for (let j = 0; j < points.length; j++) if (!done[j] && cost[j] < Infinity && (i < 0 || cost[j] < cost[i])) i = j;
+      if (i < 0 || i === 1) break;
+      done[i] = true;
+      const relax = (j, value, step) => { if (value < cost[j]) { cost[j] = value; came[j] = { from: i, step }; } };
+      for (let j = 1; j < points.length; j++) {
+        if (j !== i && !done[j] && this.walkable(points[i].pose, points[j].pose)) relax(j, cost[i] + dist2D(points[i].pose, points[j].pose) * TRAVEL_WALK, { kind: 'walk' });
+      }
+      for (const hop of points[i].node ? hops.get(points[i].node.id) || [] : []) {
+        const j = index.get(hop.destination);
+        relax(j, cost[i] + TRAVEL_HOP + hop.fee, { kind: 'hop', fee: hop.fee });
+      }
+    }
+    if (cost[1] === Infinity) return null;
+    const steps = [];
+    for (let j = 1; j !== 0; j = came[j].from) {
+      const step = came[j].step;
+      steps.unshift(step.kind === 'walk' ? { kind: 'walk', to: points[j].pose, node: points[j].node || null }
+        : { kind: 'hop', from: points[came[j].from].node, to: points[j].node, fee: step.fee });
+    }
+    return steps;
+  },
+  // WalkBack asks first: true when the walk needs a teleport or a ferry and the trip has started here instead.
+  begin(pose, dest, resume) {
+    if (!this.on() || !Number.isFinite(dist2D(pose, dest)) || this.walkable(pose, dest)) return false;
+    const steps = this.plan(pose, dest);
+    if (!steps?.some(s => s.kind === 'hop')) return false;
+    this.active = { dest: { ...dest }, resume, steps, index: 0, phase: '', at: now(), banned: new Set(), replans: 0, manualAt: Manual.lastAt };
+    const hops = steps.filter(s => s.kind === 'hop'), fees = hops.reduce((n, s) => n + s.fee, 0);
+    Log.info('Travel: the hunting spot needs ' + hops.length + ' teleport' + (hops.length === 1 ? '' : 's') + ' or ferr' + (hops.length === 1 ? 'y' : 'ies') + (fees ? ' (' + fees + ' gold)' : '') + '.');
+    this.next();
+    return true;
+  },
+  next() {
+    const a = this.active, step = a?.steps[a.index];
+    if (!a) return;
+    if (!step) {
+      this.active = null; this.message = 'Back at the hunting spot.';
+      UI.toast(this.message, 'info', 2500);
+      if (a.resume) Hunt.start();
+      return;
+    }
+    a.phase = step.kind === 'walk' ? 'walk' : 'select'; a.at = now(); a.gid = 0; a.talked = false; a.transition = false; a.refused = '';
+    if (step.kind === 'hop') { this.message = 'Travel: using ' + step.from.label + (step.fee ? ' (' + step.fee + ' gold).' : '.'); return; }
+    const last = a.index === a.steps.length - 1, label = last ? 'the hunting spot' : step.node?.label || 'the teleporter';
+    this.message = 'Travel: walking to ' + label + '.';
+    WalkBack.startTo(step.to, { label, stop: last ? 12 : TRAVEL_REACH,
+      onDone: () => { if (this.active === a) { a.index++; this.next(); } },
+      onFail: reason => { if (this.active === a) this.fail(reason); } });
+    if (this.active === a && !WalkBack.active) this.fail('the walk to ' + label + ' did not start');
+  },
+  entity(node) {
+    return [...World.ents.values()].find(e => (e.kind === 'npc' || e.kind === 'teleport') && e.refObjId === node.refObjId && dist2D(e, node.pose) <= TRAVEL_FIND);
+  },
+  tick() {
+    const a = this.active;
+    if (!a || a.phase === 'walk' || !World.inWorld()) return;
+    if (Manual.lastAt !== a.manualAt) return this.fail('manual control');
+    if (World.isDead()) return this.fail('the character died');
+    const step = a.steps[a.index], gp = World.gp;
+    if (a.phase === 'select') {
+      if (now() - a.at > TRAVEL_STEP_MS) return this.fail(step.from.label + ' could not be selected');
+      const npc = this.entity(step.from);
+      if (!npc || gp.targetPending || gp.inventoryPending) return;
+      if (gp.target !== npc.gid) { if (Cmd.spaced('select')) Cmd.select(npc.gid); return; }
+      if (!(gp.targetCapabilities & TRAVEL_PORTAL)) return this.fail(step.from.label + ' offers no teleport');
+      a.gid = npc.gid; a.phase = 'menu'; a.at = now();
+    }
+    if (a.phase === 'menu') {
+      if (gp.target !== a.gid) return this.fail('the teleporter selection changed');
+      if (!(gp.npcConversation?.phase === 'menu' && gp.npcConversation.gid === a.gid)) {
+        if (!a.talked && now() - a.at > 2000 && Cmd.raw({ kind: 'npc-talk' }, 'Travel: open the teleport menu')) a.talked = true;
+        if (now() - a.at > TRAVEL_STEP_MS) this.fail('the teleport menu did not open');
+        return;
+      }
+      if (BigInt(step.fee) > toBigInt(gp.progression?.gold ?? 0)) return this.fail('not enough gold for the ' + step.fee + ' gold fee');
+      if (Cmd.raw({ kind: 'travel-gate', gid: a.gid, type: 2, target: step.to.id }, 'Travel: ' + step.from.label + ' to teleport ' + step.to.id)) {
+        a.phase = 'arrive'; a.at = now(); a.refused = ''; a.landedAt = 0;
+        Log.info('Travel: taking ' + step.from.label + (step.fee ? ' (' + step.fee + ' gold).' : '.'));
+      }
+      return;
+    }
+    if (a.phase === 'arrive') {
+      if (a.refused || !a.transition && now() - a.at > TRAVEL_STEP_MS) return this.refused(step, a.refused);
+      if (now() - a.at > TRAVEL_ARRIVE_MS) return this.fail('the arrival timed out');
+      if (!a.transition || !World.local() || gp.inventoryPending) return;
+      // The landing is usually beside the destination teleporter; a settled landing elsewhere still walks on from there.
+      a.landedAt ||= now();
+      if (dist2D(World.pose(), step.to.pose) <= TRAVEL_LAND || now() - a.landedAt > 5000) { a.index++; this.next(); }
+    }
+  },
+  // A refused hop (fee, level, trade cart...) is left out and the rest is planned again from here.
+  refused(step, key) {
+    const a = this.active;
+    a.banned.add(step.from.id + '>' + step.to.id);
+    const why = /NOT_ENOUGH_MONEY/.test(key) ? 'not enough gold' : /LEVEL/.test(key) ? 'level too low' : key ? 'refused by the game' : 'no answer from the game';
+    Log.warn('Travel: ' + step.from.label + ' did not take you (' + why + ').');
+    const steps = a.replans < TRAVEL_REPLANS ? this.plan(World.pose(), a.dest, a.banned) : null;
+    if (!steps) return this.fail(step.from.label + ': ' + why);
+    a.replans++; a.steps = steps; a.index = 0;
+    if (Cmd.raw({ kind: 'npc-close' }, 'Travel: close the teleport menu')) this.next(); else this.fail('the teleport menu did not close');
+  },
+  notice(n) {
+    const a = this.active;
+    if (a && !a.transition && a.phase === 'arrive' && /INTERACTION_FAIL|TELEPORT/.test(String(n?.key || ''))) a.refused = String(n.key);
+  },
+  // The hop's own load screen is expected; any other world change ends the trip (lean-boot.js).
+  phase(phase) {
+    const a = this.active;
+    if (!a) return false;
+    if (phase === 'entering-world' && a.phase === 'arrive' && !a.refused && now() - a.at < TRAVEL_ARRIVE_MS) { a.transition = true; return true; }
+    this.fail('unexpected travel or disconnect');
+    return false;
+  },
+  fail(reason) {
+    if (!this.active) return;
+    this.active = null;
+    WalkBack.cancel('', false);
+    this.message = 'Travel stopped: ' + reason + '.';
+    Log.warn(this.message); UI.toast(this.message, 'warn', 6000);
+  },
+  cancel() { this.active = null; },
+  status() { return this.active ? this.message : ''; },
+};
+bus.on('notice', n => Travel.notice(n));
 
 
 // Confirm every native inventory move before casting or restoring combat gear.
@@ -8537,7 +8956,7 @@ Hunt.tick = function () {
   if (target) { this.engage(target); return; }
   this.targetGid = 0; this.state = Loot.active?.petGid ? 'loot' : 'search';
   if (H.returnToCenter && H.center && dist2D(World.pose(), H.center) > Math.max(40, H.radius * 0.5) && now() - this.lastMoveAt > 2500) {
-    // Hunting from town (dead at login and woken in town): town services and reverse, not a walk from town.
+    // Hunting from town (dead at login and woken in town): the town cycle's own trip (services, then reverse or walk).
     if (!(dist2D(World.pose(), H.center) <= Math.max(H.radius * 1.5, 600)) && Controller.townReturn()) return;
     if (!Number.isFinite(dist2D(World.pose(), H.center))) return this.stop('hunt area is in another region');
     if (Cmd.move(H.center)) this.lastMoveAt = now();
@@ -8556,7 +8975,8 @@ function stopAll() {
   Resurrect.cancelTrip('', true);
   Resurrect.holdUntil = 0;
   Controller.resumeAfterRevive = false;
-  const active = townActive || Hunt.running || Restock.trip || WalkBack.active || Loot.active;
+  const active = townActive || Hunt.running || Restock.trip || WalkBack.active || Travel.active || Loot.active;
+  Travel.cancel();
   WalkBack.cancel('', false);
   if (Hunt.running) Hunt.stop();
   Restock.trip = null;
@@ -8609,27 +9029,27 @@ const Controller = {
     }
   },
   // Start hunting again after an interruption, but only where that is safe: at the hunting spot it just starts; in
-  // the town of the saved services it does the town cycle and reverses (townReturn); otherwise it walks back.
+  // the town of the saved services it does the town cycle and goes back (townReturn); otherwise it walks back.
   // WalkBack first tries the navdata corridor and falls back to short legs; its own caps refuse a spot that is too
   // far. Returns 'started', 'town', 'walking' or 'stopped'.
   resumeHunting(prefix) {
     const H = Hunt.cfg(), pose = World.pose(), distance = H.center && pose ? dist2D(pose, H.center) : Infinity;
     if (Number.isFinite(distance) && distance <= Math.max(H.radius * 1.5, 600)) { UI.toast(prefix + '; resuming hunting.', 'info', 4000); Hunt.start(); return 'started'; }
-    if (this.townReturn()) { UI.toast(prefix + ', in town: doing town services and reversing to the hunting spot.', 'info', 4000); return 'town'; }
-    if (Number.isFinite(distance)) { UI.toast(prefix + '; walking back to the hunting spot.', 'info', 4000); WalkBack.start(true); return WalkBack.active ? 'walking' : 'stopped'; }
+    if (this.townReturn()) { UI.toast(prefix + ', in town: doing town services, then ' + (Town.reverses() ? 'reversing' : 'walking') + ' to the hunting spot.', 'info', 4000); return 'town'; }
+    if (Number.isFinite(distance)) { UI.toast(prefix + '; walking back to the hunting spot.', 'info', 4000); WalkBack.start(true); return WalkBack.active || Travel.active ? 'walking' : 'stopped'; }
     UI.toast(prefix + ', but not at the hunting spot. Use Return & hunt when ready.', 'warn', 6000);
     return 'stopped';
   },
   // Far from the hunting spot while standing in the town of the saved services: a character that was dead at login
-  // and woke up in town, or a revive the game did by itself. A walk from town to the spot is not reliable, so do the
-  // town services and reverse, as after a death in the field. True when the town cycle took over (or stopped hunting
-  // with a reason, e.g. no reverse scroll); false when not in that town or the town cycle is off.
+  // and woke up in town, or a revive the game did by itself. Do the town services first, as after a death in the
+  // field, then reverse, or walk back without a reverse scroll. True when the town cycle took over (or stopped hunting
+  // with a reason); false when not in that town or the town cycle is off.
   townReturn() {
     const c = Town.cfg();
     if (!c.enabled) return false;
     const here = Town.detect(), home = Town.detect(c.vendor || c.storage || c.arrival || {});
     if (!here || !home || here.key !== home.key) return false;
-    Log.info('Far from the hunting spot, in town: doing town services and reversing instead of walking.');
+    Log.info('Far from the hunting spot, in town: doing town services before going back.');
     WalkBack.cancel('', false);
     Hunt.deathAt = 0; Hunt.revived = false; Hunt.targetGid = 0;
     Town.begin(true);
@@ -8689,14 +9109,15 @@ const Controller = {
       if (SpeedScroll.tick()) { this.mode = 'speed scroll'; return; }
       if (this.guard('Repair hammer', () => RepairHammer.tick())) { this.mode = 'repair hammer'; return; }
       if (Trade.tick()) { this.mode = 'trading'; return; }
-      if (!WalkBack.active && !Restock.trip && !Restock.recording && !Controller.resumeAfterRevive &&
+      if (!WalkBack.active && !Travel.active && !Restock.trip && !Restock.recording && !Controller.resumeAfterRevive &&
           !Restock.activeShop() && !World.gp.storage && Resurrect.tick()) {
         this.mode = 'resurrect'; return;
       }
-      if (!WalkBack.active && !Restock.trip && !Restock.recording && !Restock.activeShop() && !World.gp.storage && Support.tick()) {
+      if (!WalkBack.active && !Travel.active && !Restock.trip && !Restock.recording && !Restock.activeShop() && !World.gp.storage && Support.tick()) {
         this.mode = 'party support'; return;
       }
       if (WalkBack.active) { this.mode = 'returning'; WalkBack.tick(); }
+      else if (Travel.active) { this.mode = 'travelling'; Travel.tick(); }
       else if (Restock.recording) this.mode = 'recording';
       else if (Hunt.running) { if (!Trace.tick()) Hunt.tick(); this.mode = Restock.trip ? 'shopping' : Hunt.state; }
       else { this.guard('Idle pet pickup', () => Loot.idleTick()); this.mode = 'idle'; }
@@ -9822,7 +10243,7 @@ const AutoStart = {
     const entry = this.entry;
     if (!entry) return;
     if (Reconnect.active()) return this.cancel('Auto-start skipped: reconnect is bringing the bot back.');
-    if (Hunt.running || Town.trip || WalkBack.active || Trade.run || Alchemy.run || Alchemy.pending || Restock.recording) return this.cancel();
+    if (Hunt.running || Town.trip || WalkBack.active || Travel.active || Trade.run || Alchemy.run || Alchemy.pending || Restock.recording) return this.cancel();
     if (now() - entry.at > AUTO_START_GIVE_UP_MS) return this.cancel('Auto-start gave up: the game did not settle within 2 minutes.');
     if (World.charName && Settings.profileKey !== 'profile:' + World.charName) { this.message = 'Auto-start: waiting for the character settings.'; return; }
     if (!this.on()) { this.entry = null; return; }
@@ -9849,7 +10270,7 @@ const AutoStart = {
     }
     Controller.resumeHunting('Auto-start');
     this.message = Town.trip ? 'Auto-start: in town. Doing town services, then back to the hunting spot.'
-      : WalkBack.active ? 'Auto-start: walking to the hunting spot.'
+      : WalkBack.active || Travel.active ? 'Auto-start: walking to the hunting spot.'
       : Hunt.running ? 'Auto-start: hunting started at the hunting spot.'
       : 'Auto-start: the bot could not start. ' + (Town.message.startsWith('Town cycle stopped:') ? Town.message : 'Check the log.');
     Log.info(this.message);
@@ -10478,7 +10899,7 @@ const Setup = {
     const error = T.enabled ? Town.validate() : '';
     out.push(T.enabled
       ? { id: 'town', icon: 'item\\etc\\mall_return_scroll', state: error ? 'bad' : 'ok', title: 'Town trips', text: error || 'Ready: the bot returns to town to repair and restock, then comes back.', action: { label: error ? 'Fix' : 'Review', run: () => this.open('Town') } }
-      : { id: 'town', icon: 'item\\etc\\mall_return_scroll', state: 'warn', title: 'Town trips', text: 'Off. Pick your town below to let the bot repair, restock potions and store loot by itself (needs return and reverse return scrolls).', action: { label: 'Set up town', run: () => this.setupTown() } });
+      : { id: 'town', icon: 'item\\etc\\mall_return_scroll', state: 'warn', title: 'Town trips', text: 'Off. Pick your town below to let the bot repair, restock potions and store loot by itself (needs return scrolls; reverse return scrolls are optional).', action: { label: 'Set up town', run: () => this.setupTown() } });
     out.push(Loot.pet()
       ? { id: 'pet', icon: 'action\\icon_cha_helper', state: 'ok', title: 'Pet', text: 'A pet is out. ' + (Loot.petMode() ? 'It collects the drops.' : 'You collect the drops yourself.'), action: { label: 'Change', run: () => this.open('Loot') } }
       : { id: 'pet', icon: 'action\\icon_cha_helper', state: 'warn', title: 'Pet', text: 'No pet is out. A pickup pet collects drops for you (optional).' });
@@ -12883,9 +13304,8 @@ const Diagnostics = {
     const blocked = Town.blocked();
     if (blocked) return 'Town return blocked: ' + blocked + '.';
     const c = Town.cfg();
-    if (['arrival', 'vendor', 'smith', 'gate', ...(c.petFull ? ['storage'] : [])].some(role => !c[role])) return 'Town return blocked: save missing service points in Supplies.';
+    if (['arrival', 'vendor', 'smith', ...(Town.walks() ? [] : ['gate']), ...(c.petFull ? ['storage'] : [])].some(role => !c[role])) return 'Town return blocked: save missing service points in Supplies.';
     if (!Town.scroll(0x09ec)) return 'Town return blocked: return scroll missing.';
-    if (!Town.scroll(0x19ec)) return 'Town return blocked: reverse scroll missing.';
     if (Town.validate()) return 'Town return blocked: check refill targets, low-stock thresholds and gold.';
     return Town.reason() ? 'Town return: preparing departure.' : '';
   },
@@ -12939,10 +13359,11 @@ const Diagnostics = {
     if (Town.trip) {
       if (Town.trip.phase === 'buy') return Town.trip.supplies.map(s => `Refilling ${s.kind === 'hp' ? 'HP' : s.kind === 'mp' ? 'MP' : 'abnormal pills'}: ${Restock.count(s.refObjId)} / ${s.target}`).join(' · ');
       if (World.gp?.inventoryPending) return 'Town services: waiting for inventory transaction.';
-      const phases = { recall: 'stopping combat for recall', 'recall-wait': 'waiting for recall arrival', 'reverse-wait': 'waiting for reverse arrival', 'revive-arrival': 'waiting for town revival', store: 'depositing loot', sell: 'selling pet loot', ammo: 'buying ammunition', repair: 'repairing equipment', reverse: 'opening reverse return' };
+      const phases = { recall: 'stopping combat for recall', 'recall-wait': 'waiting for recall arrival', 'reverse-wait': 'waiting for reverse arrival', 'revive-arrival': 'waiting for town revival', store: 'depositing loot', sell: 'selling pet loot', ammo: 'buying ammunition', repair: 'repairing equipment', reverse: 'opening reverse return', leave: 'starting the walk back' };
       if (/^(walk|open)-/.test(Town.trip.phase) && Town.message) return Town.message;
       return 'Town services: ' + (phases[Town.trip.phase] || 'travelling between or opening services') + '.';
     }
+    if (Travel.active && !WalkBack.active) return Travel.status();
     if (WalkBack.active) return WalkBack.status();
     if (Restock.trip || Resurrect.trip) return 'Travelling; waiting to reach the destination.';
     if (!Hunt.running) return AutoStart.pending() ? AutoStart.message || 'Auto-start: waiting.' : 'Bot stopped.';
@@ -12986,7 +13407,7 @@ const Diagnostics = {
       joinRequest: !!matching?.request, acceptanceSent: !!matching?.request && Party.answered === `${matching.request.a}:${matching.request.b}:${matching.request.expires}`,
       requestRemainingMs: Number.isFinite(World.simNow()) && Number.isFinite(matching?.request?.expires) ? Math.max(0, matching.request.expires - World.simNow()) : null,
       townActive: !!Town.trip,
-      townPhase: ['recall', 'recall-wait', 'revive-arrival', 'walk-arrival', 'walk-storage', 'open-storage', 'store', 'close-storage', 'walk-vendor', 'open-vendor', 'buy', 'close-vendor', 'walk-smith', 'open-smith', 'sell', 'repair', 'close-smith', 'walk-gate', 'open-gate', 'reverse', 'reverse-wait'].includes(Town.trip?.phase) ? Town.trip.phase : null,
+      townPhase: ['recall', 'recall-wait', 'revive-arrival', 'walk-arrival', 'walk-storage', 'open-storage', 'store', 'close-storage', 'walk-vendor', 'open-vendor', 'buy', 'close-vendor', 'walk-smith', 'open-smith', 'sell', 'repair', 'close-smith', 'walk-gate', 'open-gate', 'reverse', 'reverse-wait', 'leave'].includes(Town.trip?.phase) ? Town.trip.phase : null,
       scrollAttempts: this.number(Town.trip?.scrollAttempts), scrollAccepted: !!Town.trip?.scrollRequest?.accepted,
       returnScroll: !!Town.scroll(0x09ec), reverseScroll: !!Town.scroll(0x19ec),
       settings: { autoRecruit: !!c.party.autoRecruit, autoAccept: !!c.party.autoAcceptMatching,
@@ -13941,7 +14362,7 @@ const UI = {
       : Resurrect.trip ? 'Resurrecting' : BuffGear.run ? 'Buff gear' : Trade.run ? 'Trading' : Alchemy.run || Alchemy.pending ? 'Alchemy' : '';
     const label = dead ? 'Dead' : error ? 'Error' : busy || (Hunt.running ? 'Hunting' : 'Stopped');
     // `note` is what only the state can say; the icon falls back to the first wait reason, which the wide window shows below the strip.
-    const note = Town.trip ? Town.status() : WalkBack.active ? WalkBack.status() : Reconnect.active() && Reconnect.message ? Reconnect.message
+    const note = Town.trip ? Town.status() : Travel.active ? Travel.status() : WalkBack.active ? WalkBack.status() : Reconnect.active() && Reconnect.message ? Reconnect.message
       : Restock.recording ? 'Recording route: ' + Restock.draft.route.length + ' points' : '';
     const reason = note || (this.waitNote?.textContent || '').split('\n')[0];
     return { key: dead || error ? 'stop' : busy ? 'busy' : Hunt.running ? 'ok' : 'stop', label, dead, note, reason };
@@ -14401,6 +14822,8 @@ const UI = {
         this.number('Hunt radius (m)', () => H().radius / 10, v => H().radius = v * 10, 5, 200),
         this.number('Chase distance (m)', () => H().chase / 10, v => H().chase = v * 10, 10, 300),
         this.check('Return when idle', () => H().returnToCenter, v => H().returnToCenter = v),
+        this.check('Walking back may use teleports and ferries (beta; pays their fee)', () => H().travel !== false, v => H().travel = v),
+        el('p', 'Beta: a long walk back is first checked against the game map, and teleports and ferries are used where walking cannot get there. If a route looks wrong, send the log.', 'muted'),
         this.check('Avoid other players’ targets', () => H().avoidKs, v => H().avoidKs = v),
         this.number('Minimum mob level (0 = any)', () => H().levelMin, v => H().levelMin = v, 0, 140),
         this.number('Maximum mob level (0 = any)', () => H().levelMax, v => H().levelMax = v, 0, 140),
@@ -14536,7 +14959,7 @@ const UI = {
         ['mall_warehouse_ticket', 'Warehouse', () => town().storage ? 'saved' : 'not saved'],
         ['all_potion_03', 'Potions', () => town().vendor ? 'saved' : 'not saved'],
         ['mall_repair_hammer', 'Repair', () => town().smith ? 'saved' : 'not saved'],
-        ['mall_reverse_return_scroll', 'Reverse', () => count(0x19ec) + ' in bag']]) {
+        ['mall_reverse_return_scroll', 'Way back', () => Town.walks() ? 'walks back' : count(0x19ec) ? count(0x19ec) + ' reverse in bag' : 'no reverse: walks back']]) {
         const step = el('li'), slot = el('span', null, 'skill-icon'), note = el('small', detail());
         slot.append(el('span', label[0], 'fallback')); Icons.paint(slot, `item\\etc\\${icon}.ddj`);
         step.append(slot, el('strong', label), note); flow.append(step);
@@ -14558,16 +14981,17 @@ const UI = {
         this.number('No XP for (minutes)', () => town().noXp.minutes, v => town().noXp.minutes = v, 1, 120),
         this.check('On a timer', () => town().every.on, v => town().every.on = v),
         this.number('Every (minutes)', () => town().every.minutes, v => town().every.minutes = v, 5, 600),
-        this.check('Revive in town and use reverse return', () => town().revive, v => town().revive = v),
+        this.check('Revive in town and go back to the hunting spot', () => town().revive, v => town().revive = v),
         this.select('After death, reverse to', [['recall', 'Last return-scroll location (hunting area)'], ['death', 'Death location']], () => town().deathReturn, v => { town().deathReturn = v; Activity.emit({category:'settings',code:'reverse-choice-changed',text:'Revival reverse destination changed to ' + v + '.',details:{choice:v === 'death' ? 3 : 2}}); }),
-        el('p', 'Service trips reverse to their departure point. After death, use the selected destination. A missing game destination stops the trip; it never substitutes another point.', 'muted'),
+        el('p', 'Service trips reverse to their departure point. After death, use the selected destination. A missing game destination stops the trip; it never substitutes another point. Without a reverse scroll, or with Back to the hunting spot set to Walk, the trip walks back to the saved hunting spot instead.', 'muted'),
         el('p', 'Worn gear means the most worn repairable item you are wearing, measured against its own maximum durability; the trip repairs it. A broken weapon (0 durability) has its own switch, on by default. The XP and timer clocks run only while hunting and restart with every trip.', 'muted')));
   },
   section_townCycle(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
     const town = () => Town.cfg();
       const services = this.group('Scroll town cycle',
-        this.check('Use return scroll → town services → reverse return', () => town().enabled, v => { town().enabled = v; this.draw(); }),
+        this.check('Use return scroll → town services → back to the hunting spot', () => town().enabled, v => { town().enabled = v; this.draw(); }),
+        this.select('Back to the hunting spot', [['reverse', 'Reverse return scroll (walks when none is carried)'], ['walk', 'Walk']], () => town().returnBy, v => { town().returnBy = v; this.draw(); }),
         this.check('Deposit SoX gear in the warehouse (character and pet bags)', () => town().storeSox, v => town().storeSox = v),
         this.check('Sell Star gear too (instead of depositing it)', () => town().sellStar, v => town().sellStar = v),
         this.check('Sell ordinary gear from the character bag too', () => town().sellBag, v => town().sellBag = v),
@@ -14583,7 +15007,7 @@ const UI = {
         this.button('Auto-set town services', () => Town.autoSetup(false)), this.button('Redo all automatically', () => Town.autoSetup(true)));
       services.append(el('p', 'Pet loot: store elixirs, and Star / Moon / Sun gear when SoX deposit is on (needs the saved warehouse; SoX gear in your own bag goes in too, all other character items stay). Nothing is deposited right after pickup, only on the next town trip. Gear requiring one of the levels you list above (for example 85) is deposited the same way and never sold. SoX gear that is part of a saved buff set, the weapon chosen for alchemy, or matches the Keep names stays in your bag. Sell other unprotected pet items at the saved weapon / repair merchant before repairing. Other seal/rare equipment and equipment with unknown rarity stays in the pet. Ordinary equipment is sold regardless of + or blue options. With Sell Star gear too, Star gear (not Moon or Sun) is sold like ordinary gear instead of deposited (Keep names, buff-set gear, the alchemy weapon and the level list above still protect it). With the switch above, ordinary weapons, armour, shields and accessories in the character bag are sold too; other bag items only with a Sell rule. Never sold from the bag: potions, scrolls, supplies, pet summons, avatars, devil spirits, job suits, item mall items, Keep names, buff-set gear or the alchemy weapon.', 'muted'));
       services.append(this.text('Keep in pet (names)', () => town().keep, v => town().keep = v),
-        el('p', 'Town buys X-Large potions using the Buy HP/MP switches, low-stock thresholds and refill counts above. Keep each low-stock threshold below its refill target. Potion selections apply to walking-route restock. Returns when the character bag has at most one free slot. Free at least two slots before hunting again; existing character items stay protected. Revival uses the saved town services and a reverse scroll, without using a return scroll in town. Pet loot passes through one reserved character bag slot. Potions, return/reverse scrolls, beginner speed scrolls and matching Keep names are protected. Refills travel scrolls to two where sold for gold; otherwise carry spares. F8 cancels.', 'muted'));
+        el('p', 'Town buys X-Large potions using the Buy HP/MP switches, low-stock thresholds and refill counts above. Keep each low-stock threshold below its refill target. Potion selections apply to walking-route restock. Returns when the character bag has at most one free slot. Free at least two slots before hunting again; existing character items stay protected. Revival uses the saved town services without a return scroll in town, then reverses or walks back. Pet loot passes through one reserved character bag slot. Potions, return/reverse scrolls, beginner speed scrolls and matching Keep names are protected. Refills travel scrolls to two where sold for gold; otherwise carry spares. F8 cancels.', 'muted'));
       this.townNote = el('p', Town.status(), 'muted'); services.append(this.townNote); host.append(services);
   },
   section_townAmmo(host) {
@@ -14712,9 +15136,9 @@ const UI = {
       this.autoStartNote = el('p', AutoStart.status(), 'muted');
       host.append(this.group('Behaviour',
         this.check('Start the bot when this character enters the game', () => H().autoStart, v => { H().autoStart = v; this.autoStartNote.textContent = AutoStart.status(); }),
-        el('p', 'About 5 seconds after the character is in the game: at the hunting spot it starts hunting; in the town of your saved town services it does them and reverses back (needs the scroll town cycle); anywhere else it walks back; dead, it revives first. Only once per entry. Stop, F8 or a reconnect cancel it.', 'muted'),
+        el('p', 'About 5 seconds after the character is in the game: at the hunting spot it starts hunting; in the town of your saved town services it does them and goes back (needs the scroll town cycle); anywhere else it walks back; dead, it revives first. Only once per entry. Stop, F8 or a reconnect cancel it.', 'muted'),
         this.autoStartNote,
-        ...(Town.autoRevive() ? [el('p', 'On death: the town cycle revives you in town and reverses back (Town → Scroll town cycle).', 'muted')]
+        ...(Town.autoRevive() ? [el('p', 'On death: the town cycle revives you in town and goes back (Town → Scroll town cycle).', 'muted')]
           : [this.select('On death', [['stop', 'Stop'], ['wait', 'Wait'], ['revive', 'Revive and walk back']], () => H().onDeath, v => H().onDeath = v)]),
         this.check('Rest when low', () => H().sit.enabled, v => { H().sit.enabled = v; this.draw(); }),
         ...(H().sit.enabled ? [
@@ -15767,7 +16191,7 @@ UI.showActivityExport = function() {
 
 
 function toggleBot() {
-  if (Alchemy.run || Alchemy.pending || Hunt.running || Town.trip || WalkBack.active || Restock.trip || Resurrect.trip || Controller.resumeAfterRevive) stopAll();
+  if (Alchemy.run || Alchemy.pending || Hunt.running || Town.trip || WalkBack.active || Travel.active || Restock.trip || Resurrect.trip || Controller.resumeAfterRevive) stopAll();
   else if (Restock.recording) UI.toast('Finish or cancel route recording before starting the bot.', 'warn');
   else Hunt.start();
 }
@@ -15811,7 +16235,7 @@ function boot() {
       SpeedScroll.reset();
       RepairHammer.reset();
       Resurrect.reset();
-      if (Town.phase(phase)) { Loot.reset(); return; }
+      if (Town.phase(phase) || Travel.phase(phase)) { Loot.reset(); return; }
       const revival = phase === 'entering-world' && Hunt.running && (Town.autoRevive() || Hunt.cfg().onDeath === 'revive') && (Hunt.state === 'dead' || Hunt.revived);
       stopAll(); Restock.cancelRecording(); Loot.reset();
       Controller.resumeAfterRevive = revival;
@@ -15844,7 +16268,7 @@ function boot() {
   Ticker.start(() => Controller.tick(), 100);
   setInterval(() => { Wardrobe.tick(); UI.update(); }, 500);
   W.SROLean = { version: VERSION, stats: Stats, updates: Updates, diagnostics: Diagnostics, reports: Reports, alchemy: Alchemy, buffGear: BuffGear, world: World, settings: Settings, hunt: Hunt, loot: Loot, speedScroll: SpeedScroll, repairHammer: RepairHammer, resurrect: Resurrect,
-    restock: Restock, town: Town, walkBack: WalkBack, antiStuck: AntiStuck, chase: Chase, trap: Trap, autoMastery: AutoMastery, statPoints: StatPoints, share: ProfileShare, trace: Trace, setup: Setup, reconnect: Reconnect, petPotion: PetPotion, navigation: Navigation, route: Route, wardrobe: Wardrobe, wardrobeData: WdData, learned: Learned, controller: Controller, ui: UI, activity: Activity, map: LeanMap, render: RenderControl, support: Support, items: ItemRules, stop: stopAll, log: Log };
+    restock: Restock, town: Town, walkBack: WalkBack, travel: Travel, antiStuck: AntiStuck, chase: Chase, trap: Trap, autoMastery: AutoMastery, statPoints: StatPoints, share: ProfileShare, trace: Trace, setup: Setup, reconnect: Reconnect, petPotion: PetPotion, navigation: Navigation, route: Route, wardrobe: Wardrobe, wardrobeData: WdData, learned: Learned, controller: Controller, ui: UI, activity: Activity, map: LeanMap, render: RenderControl, support: Support, items: ItemRules, stop: stopAll, log: Log };
   Log.info('NIX ready. F8 starts/stops; F7 folds; F6 or the × minimises and restores; Shift+F7 hides/shows the window.');
 }
 

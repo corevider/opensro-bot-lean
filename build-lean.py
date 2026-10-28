@@ -21,6 +21,10 @@ utils = section('const now =', '// ---------------------------------------------
 utils = utils.replace("prefix: 'sroAsistan:v7:'", "prefix: 'sroBotLean:v1:'")
 geometry = section('const SECTOR =', '// ---------------------------------------------------------------------------\n// Worker hook.')
 hook = section('const Hook =', '// ---------------------------------------------------------------------------\n// Display rewriters:')
+# The game's asset worker builds any region's collision; route checks ask it for regions ahead (lean-route-check.js).
+assert hook.count("  simUrl: '',\n") == 1 and hook.count("        if (name === 'sro-simulation') {\n") == 1
+hook = hook.replace("  simUrl: '',\n", "  simUrl: '',\n  assetUrl: '',\n")
+hook = hook.replace("        if (name === 'sro-simulation') {\n", "        if (name === 'sro-assets') Hook.assetUrl = String(url);\n        if (name === 'sro-simulation') {\n")
 # Wardrobe rewrites only renderer copies; the mirror retains real items.
 hook = hook.replace("          if (!(Hook.probe.passSelect && inner && inner.kind === 'select')) return undefined;", "          return undefined;")
 world = section('const TRANSIENT_PHASES =', '// ---------------------------------------------------------------------------\n// Probe:')
@@ -258,7 +262,8 @@ parts = [header, utils, (base / 'lean-settings.js').read_text(encoding='utf-8'),
          (base / 'lean-navigation.js').read_text(encoding='utf-8'),
          (base / 'lean-pursuit-navigation.js').read_text(encoding='utf-8'),
          (base / 'lean-navdata-index.js').read_text(encoding='utf-8'),
-         (base / 'lean-route.js').read_text(encoding='utf-8'), walkback,
+         (base / 'lean-route.js').read_text(encoding='utf-8'),
+         (base / 'lean-route-check.js').read_text(encoding='utf-8'), walkback,
          (base / 'lean-loot.js').read_text(encoding='utf-8'),
          (base / 'lean-stats.js').read_text(encoding='utf-8'),
          (base / 'lean-party.js').read_text(encoding='utf-8'),
@@ -267,6 +272,8 @@ parts = [header, utils, (base / 'lean-settings.js').read_text(encoding='utf-8'),
          (base / 'lean-repair-hammer.js').read_text(encoding='utf-8'),
          (base / 'lean-towns-data.js').read_text(encoding='utf-8'),
          (base / 'lean-town.js').read_text(encoding='utf-8'),
+         (base / 'lean-travel-data.js').read_text(encoding='utf-8'),
+         (base / 'lean-travel.js').read_text(encoding='utf-8'),
          (base / 'lean-buff-gear.js').read_text(encoding='utf-8'),
          (base / 'lean-support.js').read_text(encoding='utf-8'),
          (base / 'lean-trade.js').read_text(encoding='utf-8'),
