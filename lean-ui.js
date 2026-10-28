@@ -840,7 +840,7 @@ const UI = {
         ['mall_warehouse_ticket', 'Warehouse', () => town().storage ? 'saved' : 'not saved'],
         ['all_potion_03', 'Potions', () => town().vendor ? 'saved' : 'not saved'],
         ['mall_repair_hammer', 'Repair', () => town().smith ? 'saved' : 'not saved'],
-        ['mall_reverse_return_scroll', 'Reverse', () => count(0x19ec) + ' in bag']]) {
+        ['mall_reverse_return_scroll', 'Way back', () => Town.walks() ? 'walks back' : count(0x19ec) ? count(0x19ec) + ' reverse in bag' : 'no reverse: walks back']]) {
         const step = el('li'), slot = el('span', null, 'skill-icon'), note = el('small', detail());
         slot.append(el('span', label[0], 'fallback')); Icons.paint(slot, `item\\etc\\${icon}.ddj`);
         step.append(slot, el('strong', label), note); flow.append(step);
@@ -862,16 +862,17 @@ const UI = {
         this.number('No XP for (minutes)', () => town().noXp.minutes, v => town().noXp.minutes = v, 1, 120),
         this.check('On a timer', () => town().every.on, v => town().every.on = v),
         this.number('Every (minutes)', () => town().every.minutes, v => town().every.minutes = v, 5, 600),
-        this.check('Revive in town and use reverse return', () => town().revive, v => town().revive = v),
+        this.check('Revive in town and go back to the hunting spot', () => town().revive, v => town().revive = v),
         this.select('After death, reverse to', [['recall', 'Last return-scroll location (hunting area)'], ['death', 'Death location']], () => town().deathReturn, v => { town().deathReturn = v; Activity.emit({category:'settings',code:'reverse-choice-changed',text:'Revival reverse destination changed to ' + v + '.',details:{choice:v === 'death' ? 3 : 2}}); }),
-        el('p', 'Service trips reverse to their departure point. After death, use the selected destination. A missing game destination stops the trip; it never substitutes another point.', 'muted'),
+        el('p', 'Service trips reverse to their departure point. After death, use the selected destination. A missing game destination stops the trip; it never substitutes another point. Without a reverse scroll, or with Back to the hunting spot set to Walk, the trip walks back to the saved hunting spot instead.', 'muted'),
         el('p', 'Worn gear means the most worn repairable item you are wearing, measured against its own maximum durability; the trip repairs it. A broken weapon (0 durability) has its own switch, on by default. The XP and timer clocks run only while hunting and restart with every trip.', 'muted')));
   },
   section_townCycle(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
     const town = () => Town.cfg();
       const services = this.group('Scroll town cycle',
-        this.check('Use return scroll → town services → reverse return', () => town().enabled, v => { town().enabled = v; this.draw(); }),
+        this.check('Use return scroll → town services → back to the hunting spot', () => town().enabled, v => { town().enabled = v; this.draw(); }),
+        this.select('Back to the hunting spot', [['reverse', 'Reverse return scroll (walks when none is carried)'], ['walk', 'Walk']], () => town().returnBy, v => { town().returnBy = v; this.draw(); }),
         this.check('Deposit SoX gear in the warehouse (character and pet bags)', () => town().storeSox, v => town().storeSox = v),
         this.check('Sell Star gear too (instead of depositing it)', () => town().sellStar, v => town().sellStar = v),
         this.check('Sell ordinary gear from the character bag too', () => town().sellBag, v => town().sellBag = v),
@@ -887,7 +888,7 @@ const UI = {
         this.button('Auto-set town services', () => Town.autoSetup(false)), this.button('Redo all automatically', () => Town.autoSetup(true)));
       services.append(el('p', 'Pet loot: store elixirs, and Star / Moon / Sun gear when SoX deposit is on (needs the saved warehouse; SoX gear in your own bag goes in too, all other character items stay). Nothing is deposited right after pickup, only on the next town trip. Gear requiring one of the levels you list above (for example 85) is deposited the same way and never sold. SoX gear that is part of a saved buff set, the weapon chosen for alchemy, or matches the Keep names stays in your bag. Sell other unprotected pet items at the saved weapon / repair merchant before repairing. Other seal/rare equipment and equipment with unknown rarity stays in the pet. Ordinary equipment is sold regardless of + or blue options. With Sell Star gear too, Star gear (not Moon or Sun) is sold like ordinary gear instead of deposited (Keep names, buff-set gear, the alchemy weapon and the level list above still protect it). With the switch above, ordinary weapons, armour, shields and accessories in the character bag are sold too; other bag items only with a Sell rule. Never sold from the bag: potions, scrolls, supplies, pet summons, avatars, devil spirits, job suits, item mall items, Keep names, buff-set gear or the alchemy weapon.', 'muted'));
       services.append(this.text('Keep in pet (names)', () => town().keep, v => town().keep = v),
-        el('p', 'Town buys X-Large potions using the Buy HP/MP switches, low-stock thresholds and refill counts above. Keep each low-stock threshold below its refill target. Potion selections apply to walking-route restock. Returns when the character bag has at most one free slot. Free at least two slots before hunting again; existing character items stay protected. Revival uses the saved town services and a reverse scroll, without using a return scroll in town. Pet loot passes through one reserved character bag slot. Potions, return/reverse scrolls, beginner speed scrolls and matching Keep names are protected. Refills travel scrolls to two where sold for gold; otherwise carry spares. F8 cancels.', 'muted'));
+        el('p', 'Town buys X-Large potions using the Buy HP/MP switches, low-stock thresholds and refill counts above. Keep each low-stock threshold below its refill target. Potion selections apply to walking-route restock. Returns when the character bag has at most one free slot. Free at least two slots before hunting again; existing character items stay protected. Revival uses the saved town services without a return scroll in town, then reverses or walks back. Pet loot passes through one reserved character bag slot. Potions, return/reverse scrolls, beginner speed scrolls and matching Keep names are protected. Refills travel scrolls to two where sold for gold; otherwise carry spares. F8 cancels.', 'muted'));
       this.townNote = el('p', Town.status(), 'muted'); services.append(this.townNote); host.append(services);
   },
   section_townAmmo(host) {
@@ -1016,9 +1017,9 @@ const UI = {
       this.autoStartNote = el('p', AutoStart.status(), 'muted');
       host.append(this.group('Behaviour',
         this.check('Start the bot when this character enters the game', () => H().autoStart, v => { H().autoStart = v; this.autoStartNote.textContent = AutoStart.status(); }),
-        el('p', 'About 5 seconds after the character is in the game: at the hunting spot it starts hunting; in the town of your saved town services it does them and reverses back (needs the scroll town cycle); anywhere else it walks back; dead, it revives first. Only once per entry. Stop, F8 or a reconnect cancel it.', 'muted'),
+        el('p', 'About 5 seconds after the character is in the game: at the hunting spot it starts hunting; in the town of your saved town services it does them and goes back (needs the scroll town cycle); anywhere else it walks back; dead, it revives first. Only once per entry. Stop, F8 or a reconnect cancel it.', 'muted'),
         this.autoStartNote,
-        ...(Town.autoRevive() ? [el('p', 'On death: the town cycle revives you in town and reverses back (Town → Scroll town cycle).', 'muted')]
+        ...(Town.autoRevive() ? [el('p', 'On death: the town cycle revives you in town and goes back (Town → Scroll town cycle).', 'muted')]
           : [this.select('On death', [['stop', 'Stop'], ['wait', 'Wait'], ['revive', 'Revive and walk back']], () => H().onDeath, v => H().onDeath = v)]),
         this.check('Rest when low', () => H().sit.enabled, v => { H().sit.enabled = v; this.draw(); }),
         ...(H().sit.enabled ? [

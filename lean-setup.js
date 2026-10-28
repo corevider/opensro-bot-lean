@@ -51,7 +51,7 @@ const Setup = {
     const error = T.enabled ? Town.validate() : '';
     out.push(T.enabled
       ? { id: 'town', icon: 'item\\etc\\mall_return_scroll', state: error ? 'bad' : 'ok', title: 'Town trips', text: error || 'Ready: the bot returns to town to repair and restock, then comes back.', action: { label: error ? 'Fix' : 'Review', run: () => this.open('Town') } }
-      : { id: 'town', icon: 'item\\etc\\mall_return_scroll', state: 'warn', title: 'Town trips', text: 'Off. Pick your town below to let the bot repair, restock potions and store loot by itself (needs return and reverse return scrolls).', action: { label: 'Set up town', run: () => this.setupTown() } });
+      : { id: 'town', icon: 'item\\etc\\mall_return_scroll', state: 'warn', title: 'Town trips', text: 'Off. Pick your town below to let the bot repair, restock potions and store loot by itself (needs return scrolls; reverse return scrolls are optional).', action: { label: 'Set up town', run: () => this.setupTown() } });
     out.push(Loot.pet()
       ? { id: 'pet', icon: 'action\\icon_cha_helper', state: 'ok', title: 'Pet', text: 'A pet is out. ' + (Loot.petMode() ? 'It collects the drops.' : 'You collect the drops yourself.'), action: { label: 'Change', run: () => this.open('Loot') } }
       : { id: 'pet', icon: 'action\\icon_cha_helper', state: 'warn', title: 'Pet', text: 'No pet is out. A pickup pet collects drops for you (optional).' });

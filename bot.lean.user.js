@@ -214,7 +214,7 @@ const DEFAULT_PROFILE = {
     prefer: { hp: 0, mp: 0, vigor: 0, cure: 0 }, delayMs: 350,
     restock: {
       enabled: false, vendor: null, route: [], offers: [],
-      town: { enabled: false, revive: true, deathReturn: 'recall', storeSox: true, sellStar: false, sellBag: false, storeLevels: '', petFull: true, petFree: 1, arrivalRadius: 500,
+      town: { enabled: false, revive: true, deathReturn: 'recall', returnBy: 'reverse', storeSox: true, sellStar: false, sellBag: false, storeLevels: '', petFull: true, petFree: 1, arrivalRadius: 500,
         broken: true, wear: { on: false, pct: 15 }, noXp: { on: false, minutes: 10 }, every: { on: false, minutes: 60 }, arrival: null, storage: null, vendor: null, smith: null, gate: null,
         keep: '', store: { equipment: true, elixirs: true, powders: true, alchemy: true, others: false } },
       hp: { on: true, refObjId: 0, low: 20, target: 100 },
@@ -261,6 +261,7 @@ function botProfile(input) {
   delete result.potion.restock.town.stacks;
   if (!Number.isInteger(result.potion.delayMs) || result.potion.delayMs < 0 || result.potion.delayMs > 60000) result.potion.delayMs = DEFAULT_PROFILE.potion.delayMs;
   if (!['death', 'recall'].includes(result.potion.restock.town.deathReturn)) result.potion.restock.town.deathReturn = 'recall';
+  if (!['reverse', 'walk'].includes(result.potion.restock.town.returnBy)) result.potion.restock.town.returnBy = 'reverse';
   // New categories inherit the old Other items switch, preserving existing selection.
   const pickup = input.hunt?.pickup;
   for (const key of ['elixirs', 'powders', 'alchemy']) {
@@ -6989,6 +6990,7 @@ const TOWN_TABLE = [{"key":"EU","name":"Constantinople","arrival":{"regionId":26
 
 
 // Town service owns the whole recall -> warehouse -> shop -> smith -> reverse trip.
+// Without a reverse scroll (or with Back to the hunting spot: Walk) the trip ends after the services and WalkBack walks back.
 // Native travel-gate type 5 spends the reverse scroll: choice 2 recalls, choice 3 returns to death.
 // See OpenSRO action/reversereturn.go, 6FEF10 and 5DA1B0's choice rows.
 const TOWN_REVERSE = { recall: 2, death: 3 };
@@ -7312,12 +7314,15 @@ const Town = {
   restartClocks() { this.lastXpAt = this.cycleFrom = now(); },
   // Already standing in a known town (all four services in range): no return scroll is needed or wanted.
   inTown(revival = false) { return !revival && !!World.pose() && !!this.detect(World.pose()); },
+  // The way back after the services: the reverse scroll when that is the choice and one is carried, otherwise a walk.
+  walks() { return this.cfg().returnBy === 'walk'; },
+  reverses() { return !this.walks() && !!this.scroll(0x19ec); },
   validate(revival = false) {
     const c = this.cfg(), supplies = this.supplies();
-    const missing = [['arrival', 'arrival point'], ['vendor', 'potion merchant'], ['smith', 'repair merchant'], ['gate', 'world statue / teleport'], ...(c.petFull ? [['storage', 'warehouse']] : [])].filter(([key]) => !c[key]).map(([, label]) => label);
+    const missing = [['arrival', 'arrival point'], ['vendor', 'potion merchant'], ['smith', 'repair merchant'], ...(this.walks() ? [] : [['gate', 'world statue / teleport']]), ...(c.petFull ? [['storage', 'warehouse']] : [])].filter(([key]) => !c[key]).map(([, label]) => label);
     if (missing.length) return 'Save missing town services: ' + missing.join(', ') + '.';
     if (!supplies.length || supplies.some(s => !s.refObjId || !Number.isInteger(s.low) || !Number.isInteger(s.target) || s.low < 0 || s.target <= s.low || s.target > 10000)) return 'Choose potions and valid low-stock/refill quantities.';
-    if ((!revival && !this.inTown() && !this.scroll(0x09ec)) || !this.scroll(0x19ec)) return revival ? 'Carry a reverse return scroll for revival return.' : 'Carry a return scroll and a reverse return scroll before hunting.';
+    if (!revival && !this.inTown() && !this.scroll(0x09ec)) return 'Carry a return scroll before hunting.';
     if (toBigInt(World.gp.progression?.gold ?? 0) <= 0n) return 'Carry gold for potions, storage and repairs.';
     return '';
   },
@@ -7350,6 +7355,7 @@ const Town = {
     const inTown = this.inTown(revival);
     const origin = revival || inTown ? (reverseChoice === TOWN_REVERSE.death ? this.deathPoint || Hunt.cfg().center : this.lastScrollPoint || Hunt.cfg().center) : World.pose();
     if (!origin) return this.fail(inTown ? 'No saved hunting point to return to; set the hunting area first.' : 'No saved hunting point for revival return.');
+    if (!this.walks() && !this.scroll(0x19ec)) Log.info('No reverse return scroll: unless one is bought in town, the trip walks back to the hunting spot after the services.');
     if (revival) Hunt.running = true;
     Restock.trip = null;
     Resurrect.cancelTrip('', true); Resurrect.holdUntil = 0; Loot.suspend();
@@ -7388,12 +7394,32 @@ const Town = {
   order(full) {
     const sellFirst = this.trip?.sellFirst;
     const order = !sellFirst ? ['storage', 'vendor', 'smith', 'gate'] : full ? ['smith', 'storage', 'vendor', 'gate'] : ['storage', 'smith', 'vendor', 'gate'];
-    return this.cfg().storage ? order : order.filter(role => role !== 'storage');
+    return order.filter(role => (role !== 'storage' || this.cfg().storage) && (role !== 'gate' || !this.walks()));
   },
-  // The service to walk to after closing a window.
+  // The service to walk to after closing a window. After the last one: the world statue to reverse, or the walk back
+  // when no reverse scroll is carried (none was bought in town either).
   closeNext(phase) {
-    const order = this.trip?.order || this.order(false), role = phase.replace(/^close-/, '');
-    return 'walk-' + (order[order.indexOf(role) + 1] || 'gate');
+    const order = this.trip?.order || this.order(false), role = phase.replace(/^close-/, ''), next = order[order.indexOf(role) + 1] || 'gate';
+    return next === 'gate' && !this.reverses() ? 'leave' : 'walk-' + next;
+  },
+  // Walk back instead of reversing: the trip ends here and WalkBack, which resumes hunting on arrival, takes over.
+  // A trapped-character recovery trip stops in town instead, as it does before a reverse (lean-trap.js).
+  leave() {
+    const t = this.trip, gp = World.gp;
+    if (t.recovery) {
+      this.trip = null;
+      Hunt.stop('Recovery town services completed. Check the hunting spot before returning.');
+      return;
+    }
+    if (gp.inventoryPending || World.isCasting()) return;
+    if (t.supplies.some(s => Restock.count(s.refObjId) < s.target) || this.damaged().length || !t.revival && !this.scroll(0x09ec)) return this.fail('Final supply, repair or travel-scroll check failed.');
+    if (World.freeBagSlots() <= 1) return this.fail('Returned to town; free at least two character bag slots before hunting again.');
+    if (!Hunt.cfg().center) return this.fail('No saved hunting spot to walk back to.');
+    this.trip = null; Hunt.targetGid = Hunt.lootGid = 0; this.restartClocks();
+    WalkBack.start(true);
+    if (!WalkBack.active) { this.message = 'Town cycle stopped: the walk back to the hunting spot did not start.'; Hunt.stop(this.message); return; }
+    this.message = 'Town service complete; walking back to the hunting spot.';
+    Log.info(this.message); UI.toast(this.message);
   },
   enter(phase) {
     const t = this.trip;
@@ -7599,15 +7625,16 @@ const Town = {
     t.buySkipped ||= [];
     let s = t.supplies.find(s => !t.buySkipped.includes(s.refObjId) && Restock.count(s.refObjId) < s.target);
     if (!s) {
-      // Refill held travel scrolls from gold offers only. Never buy from Item Mall.
-      for (const type of [0x09ec, 0x19ec]) {
+      // Refill held travel scrolls from gold offers only. Never buy from Item Mall. A missing reverse scroll is not an
+      // error: the trip walks back instead.
+      for (const type of this.walks() ? [0x09ec] : [0x09ec, 0x19ec]) {
         const count = World.items().filter(i => (i.typeFlags & 0xfffc) === type).reduce((n, i) => n + (i.quantity ?? 1), 0);
         if (count >= 2) continue;
         const offer = shop.offers.find(o => (o.currency === undefined || o.currency === 1) &&
           (o.items || o.previews || []).some(i => i.refObjId === o.refObjId && (i.typeFlags & 0xfffc) === type) &&
           (!o.contents?.length || o.contents.length === 1 && o.contents[0].refObjId === o.refObjId && o.contents[0].quantity === 1));
         if (offer) { s = { kind: 'scroll', refObjId: offer.refObjId, target: Restock.count(offer.refObjId) + 2 - count }; break; }
-        if (!count) return this.fail('Travel scrolls unavailable at this merchant. Carry spares.');
+        if (!count && type === 0x09ec) return this.fail('Travel scrolls unavailable at this merchant. Carry spares.');
       }
     }
     if (!s) { this.enter('close-vendor'); return; }
@@ -7759,6 +7786,7 @@ const Town = {
     else if (t.phase === 'sell') this.sell();
     else if (t.phase === 'ammo') this.ammo();
     else if (t.phase === 'repair') this.repair();
+    else if (t.phase === 'leave') this.leave();
     else if (t.phase.startsWith('close-')) {
       if (now() - t.at > 15000) this.fail('NPC window did not close.');
       else this.close(this.closeNext(t.phase));
@@ -8751,7 +8779,7 @@ Hunt.tick = function () {
   if (target) { this.engage(target); return; }
   this.targetGid = 0; this.state = Loot.active?.petGid ? 'loot' : 'search';
   if (H.returnToCenter && H.center && dist2D(World.pose(), H.center) > Math.max(40, H.radius * 0.5) && now() - this.lastMoveAt > 2500) {
-    // Hunting from town (dead at login and woken in town): town services and reverse, not a walk from town.
+    // Hunting from town (dead at login and woken in town): the town cycle's own trip (services, then reverse or walk).
     if (!(dist2D(World.pose(), H.center) <= Math.max(H.radius * 1.5, 600)) && Controller.townReturn()) return;
     if (!Number.isFinite(dist2D(World.pose(), H.center))) return this.stop('hunt area is in another region');
     if (Cmd.move(H.center)) this.lastMoveAt = now();
@@ -8823,27 +8851,27 @@ const Controller = {
     }
   },
   // Start hunting again after an interruption, but only where that is safe: at the hunting spot it just starts; in
-  // the town of the saved services it does the town cycle and reverses (townReturn); otherwise it walks back.
+  // the town of the saved services it does the town cycle and goes back (townReturn); otherwise it walks back.
   // WalkBack first tries the navdata corridor and falls back to short legs; its own caps refuse a spot that is too
   // far. Returns 'started', 'town', 'walking' or 'stopped'.
   resumeHunting(prefix) {
     const H = Hunt.cfg(), pose = World.pose(), distance = H.center && pose ? dist2D(pose, H.center) : Infinity;
     if (Number.isFinite(distance) && distance <= Math.max(H.radius * 1.5, 600)) { UI.toast(prefix + '; resuming hunting.', 'info', 4000); Hunt.start(); return 'started'; }
-    if (this.townReturn()) { UI.toast(prefix + ', in town: doing town services and reversing to the hunting spot.', 'info', 4000); return 'town'; }
+    if (this.townReturn()) { UI.toast(prefix + ', in town: doing town services, then ' + (Town.reverses() ? 'reversing' : 'walking') + ' to the hunting spot.', 'info', 4000); return 'town'; }
     if (Number.isFinite(distance)) { UI.toast(prefix + '; walking back to the hunting spot.', 'info', 4000); WalkBack.start(true); return WalkBack.active ? 'walking' : 'stopped'; }
     UI.toast(prefix + ', but not at the hunting spot. Use Return & hunt when ready.', 'warn', 6000);
     return 'stopped';
   },
   // Far from the hunting spot while standing in the town of the saved services: a character that was dead at login
-  // and woke up in town, or a revive the game did by itself. A walk from town to the spot is not reliable, so do the
-  // town services and reverse, as after a death in the field. True when the town cycle took over (or stopped hunting
-  // with a reason, e.g. no reverse scroll); false when not in that town or the town cycle is off.
+  // and woke up in town, or a revive the game did by itself. Do the town services first, as after a death in the
+  // field, then reverse, or walk back without a reverse scroll. True when the town cycle took over (or stopped hunting
+  // with a reason); false when not in that town or the town cycle is off.
   townReturn() {
     const c = Town.cfg();
     if (!c.enabled) return false;
     const here = Town.detect(), home = Town.detect(c.vendor || c.storage || c.arrival || {});
     if (!here || !home || here.key !== home.key) return false;
-    Log.info('Far from the hunting spot, in town: doing town services and reversing instead of walking.');
+    Log.info('Far from the hunting spot, in town: doing town services before going back.');
     WalkBack.cancel('', false);
     Hunt.deathAt = 0; Hunt.revived = false; Hunt.targetGid = 0;
     Town.begin(true);
@@ -9983,13 +10011,13 @@ const Reconnect = {
       return UI.toast(this.message, 'info', 4000);
     }
     // Back in the town of the saved services (a death while disconnected respawns there, or the drop came during a
-    // town trip) and far from the hunting spot: do the town services and reverse, as after a death, instead of walking.
+    // town trip) and far from the hunting spot: do the town services first, as after a death, then reverse or walk back.
     // The character may stand anywhere in town, so the services start from here instead of waiting at the scroll's
     // landing spot. Another town has none of the saved services: walk-back handles that.
     const H = Hunt.cfg(), spot = H.center && World.pose() ? dist2D(World.pose(), H.center) : NaN;
     const c = Town.cfg(), here = Town.detect(), home = Town.detect(c.vendor || c.storage || c.arrival || {});
     if (Town.autoRevive() && Number.isFinite(spot) && spot > Math.max(H.radius * 1.5, 600) && here && home && here.key === home.key) {
-      UI.toast('Back in the game, in town; doing town services and reversing to the hunting spot.', 'info', 4000);
+      UI.toast('Back in the game, in town; doing town services, then ' + (Town.reverses() ? 'reversing' : 'walking') + ' to the hunting spot.', 'info', 4000);
       Controller.returnAfterRevive();
       if (Town.trip?.phase === 'revive-arrival') Town.arrived();
       return this.clear(Town.trip ? '' : 'Back in the game, but the town cycle could not start: ' + Town.message);
@@ -10692,7 +10720,7 @@ const Setup = {
     const error = T.enabled ? Town.validate() : '';
     out.push(T.enabled
       ? { id: 'town', icon: 'item\\etc\\mall_return_scroll', state: error ? 'bad' : 'ok', title: 'Town trips', text: error || 'Ready: the bot returns to town to repair and restock, then comes back.', action: { label: error ? 'Fix' : 'Review', run: () => this.open('Town') } }
-      : { id: 'town', icon: 'item\\etc\\mall_return_scroll', state: 'warn', title: 'Town trips', text: 'Off. Pick your town below to let the bot repair, restock potions and store loot by itself (needs return and reverse return scrolls).', action: { label: 'Set up town', run: () => this.setupTown() } });
+      : { id: 'town', icon: 'item\\etc\\mall_return_scroll', state: 'warn', title: 'Town trips', text: 'Off. Pick your town below to let the bot repair, restock potions and store loot by itself (needs return scrolls; reverse return scrolls are optional).', action: { label: 'Set up town', run: () => this.setupTown() } });
     out.push(Loot.pet()
       ? { id: 'pet', icon: 'action\\icon_cha_helper', state: 'ok', title: 'Pet', text: 'A pet is out. ' + (Loot.petMode() ? 'It collects the drops.' : 'You collect the drops yourself.'), action: { label: 'Change', run: () => this.open('Loot') } }
       : { id: 'pet', icon: 'action\\icon_cha_helper', state: 'warn', title: 'Pet', text: 'No pet is out. A pickup pet collects drops for you (optional).' });
@@ -13097,9 +13125,8 @@ const Diagnostics = {
     const blocked = Town.blocked();
     if (blocked) return 'Town return blocked: ' + blocked + '.';
     const c = Town.cfg();
-    if (['arrival', 'vendor', 'smith', 'gate', ...(c.petFull ? ['storage'] : [])].some(role => !c[role])) return 'Town return blocked: save missing service points in Supplies.';
+    if (['arrival', 'vendor', 'smith', ...(Town.walks() ? [] : ['gate']), ...(c.petFull ? ['storage'] : [])].some(role => !c[role])) return 'Town return blocked: save missing service points in Supplies.';
     if (!Town.scroll(0x09ec)) return 'Town return blocked: return scroll missing.';
-    if (!Town.scroll(0x19ec)) return 'Town return blocked: reverse scroll missing.';
     if (Town.validate()) return 'Town return blocked: check refill targets, low-stock thresholds and gold.';
     return Town.reason() ? 'Town return: preparing departure.' : '';
   },
@@ -13153,7 +13180,7 @@ const Diagnostics = {
     if (Town.trip) {
       if (Town.trip.phase === 'buy') return Town.trip.supplies.map(s => `Refilling ${s.kind === 'hp' ? 'HP' : s.kind === 'mp' ? 'MP' : 'abnormal pills'}: ${Restock.count(s.refObjId)} / ${s.target}`).join(' · ');
       if (World.gp?.inventoryPending) return 'Town services: waiting for inventory transaction.';
-      const phases = { recall: 'stopping combat for recall', 'recall-wait': 'waiting for recall arrival', 'reverse-wait': 'waiting for reverse arrival', 'revive-arrival': 'waiting for town revival', store: 'depositing loot', sell: 'selling pet loot', ammo: 'buying ammunition', repair: 'repairing equipment', reverse: 'opening reverse return' };
+      const phases = { recall: 'stopping combat for recall', 'recall-wait': 'waiting for recall arrival', 'reverse-wait': 'waiting for reverse arrival', 'revive-arrival': 'waiting for town revival', store: 'depositing loot', sell: 'selling pet loot', ammo: 'buying ammunition', repair: 'repairing equipment', reverse: 'opening reverse return', leave: 'starting the walk back' };
       if (/^(walk|open)-/.test(Town.trip.phase) && Town.message) return Town.message;
       return 'Town services: ' + (phases[Town.trip.phase] || 'travelling between or opening services') + '.';
     }
@@ -13200,7 +13227,7 @@ const Diagnostics = {
       joinRequest: !!matching?.request, acceptanceSent: !!matching?.request && Party.answered === `${matching.request.a}:${matching.request.b}:${matching.request.expires}`,
       requestRemainingMs: Number.isFinite(World.simNow()) && Number.isFinite(matching?.request?.expires) ? Math.max(0, matching.request.expires - World.simNow()) : null,
       townActive: !!Town.trip,
-      townPhase: ['recall', 'recall-wait', 'revive-arrival', 'walk-arrival', 'walk-storage', 'open-storage', 'store', 'close-storage', 'walk-vendor', 'open-vendor', 'buy', 'close-vendor', 'walk-smith', 'open-smith', 'sell', 'repair', 'close-smith', 'walk-gate', 'open-gate', 'reverse', 'reverse-wait'].includes(Town.trip?.phase) ? Town.trip.phase : null,
+      townPhase: ['recall', 'recall-wait', 'revive-arrival', 'walk-arrival', 'walk-storage', 'open-storage', 'store', 'close-storage', 'walk-vendor', 'open-vendor', 'buy', 'close-vendor', 'walk-smith', 'open-smith', 'sell', 'repair', 'close-smith', 'walk-gate', 'open-gate', 'reverse', 'reverse-wait', 'leave'].includes(Town.trip?.phase) ? Town.trip.phase : null,
       scrollAttempts: this.number(Town.trip?.scrollAttempts), scrollAccepted: !!Town.trip?.scrollRequest?.accepted,
       returnScroll: !!Town.scroll(0x09ec), reverseScroll: !!Town.scroll(0x19ec),
       settings: { autoRecruit: !!c.party.autoRecruit, autoAccept: !!c.party.autoAcceptMatching,
@@ -14750,7 +14777,7 @@ const UI = {
         ['mall_warehouse_ticket', 'Warehouse', () => town().storage ? 'saved' : 'not saved'],
         ['all_potion_03', 'Potions', () => town().vendor ? 'saved' : 'not saved'],
         ['mall_repair_hammer', 'Repair', () => town().smith ? 'saved' : 'not saved'],
-        ['mall_reverse_return_scroll', 'Reverse', () => count(0x19ec) + ' in bag']]) {
+        ['mall_reverse_return_scroll', 'Way back', () => Town.walks() ? 'walks back' : count(0x19ec) ? count(0x19ec) + ' reverse in bag' : 'no reverse: walks back']]) {
         const step = el('li'), slot = el('span', null, 'skill-icon'), note = el('small', detail());
         slot.append(el('span', label[0], 'fallback')); Icons.paint(slot, `item\\etc\\${icon}.ddj`);
         step.append(slot, el('strong', label), note); flow.append(step);
@@ -14772,16 +14799,17 @@ const UI = {
         this.number('No XP for (minutes)', () => town().noXp.minutes, v => town().noXp.minutes = v, 1, 120),
         this.check('On a timer', () => town().every.on, v => town().every.on = v),
         this.number('Every (minutes)', () => town().every.minutes, v => town().every.minutes = v, 5, 600),
-        this.check('Revive in town and use reverse return', () => town().revive, v => town().revive = v),
+        this.check('Revive in town and go back to the hunting spot', () => town().revive, v => town().revive = v),
         this.select('After death, reverse to', [['recall', 'Last return-scroll location (hunting area)'], ['death', 'Death location']], () => town().deathReturn, v => { town().deathReturn = v; Activity.emit({category:'settings',code:'reverse-choice-changed',text:'Revival reverse destination changed to ' + v + '.',details:{choice:v === 'death' ? 3 : 2}}); }),
-        el('p', 'Service trips reverse to their departure point. After death, use the selected destination. A missing game destination stops the trip; it never substitutes another point.', 'muted'),
+        el('p', 'Service trips reverse to their departure point. After death, use the selected destination. A missing game destination stops the trip; it never substitutes another point. Without a reverse scroll, or with Back to the hunting spot set to Walk, the trip walks back to the saved hunting spot instead.', 'muted'),
         el('p', 'Worn gear means the most worn repairable item you are wearing, measured against its own maximum durability; the trip repairs it. A broken weapon (0 durability) has its own switch, on by default. The XP and timer clocks run only while hunting and restart with every trip.', 'muted')));
   },
   section_townCycle(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
     const town = () => Town.cfg();
       const services = this.group('Scroll town cycle',
-        this.check('Use return scroll → town services → reverse return', () => town().enabled, v => { town().enabled = v; this.draw(); }),
+        this.check('Use return scroll → town services → back to the hunting spot', () => town().enabled, v => { town().enabled = v; this.draw(); }),
+        this.select('Back to the hunting spot', [['reverse', 'Reverse return scroll (walks when none is carried)'], ['walk', 'Walk']], () => town().returnBy, v => { town().returnBy = v; this.draw(); }),
         this.check('Deposit SoX gear in the warehouse (character and pet bags)', () => town().storeSox, v => town().storeSox = v),
         this.check('Sell Star gear too (instead of depositing it)', () => town().sellStar, v => town().sellStar = v),
         this.check('Sell ordinary gear from the character bag too', () => town().sellBag, v => town().sellBag = v),
@@ -14797,7 +14825,7 @@ const UI = {
         this.button('Auto-set town services', () => Town.autoSetup(false)), this.button('Redo all automatically', () => Town.autoSetup(true)));
       services.append(el('p', 'Pet loot: store elixirs, and Star / Moon / Sun gear when SoX deposit is on (needs the saved warehouse; SoX gear in your own bag goes in too, all other character items stay). Nothing is deposited right after pickup, only on the next town trip. Gear requiring one of the levels you list above (for example 85) is deposited the same way and never sold. SoX gear that is part of a saved buff set, the weapon chosen for alchemy, or matches the Keep names stays in your bag. Sell other unprotected pet items at the saved weapon / repair merchant before repairing. Other seal/rare equipment and equipment with unknown rarity stays in the pet. Ordinary equipment is sold regardless of + or blue options. With Sell Star gear too, Star gear (not Moon or Sun) is sold like ordinary gear instead of deposited (Keep names, buff-set gear, the alchemy weapon and the level list above still protect it). With the switch above, ordinary weapons, armour, shields and accessories in the character bag are sold too; other bag items only with a Sell rule. Never sold from the bag: potions, scrolls, supplies, pet summons, avatars, devil spirits, job suits, item mall items, Keep names, buff-set gear or the alchemy weapon.', 'muted'));
       services.append(this.text('Keep in pet (names)', () => town().keep, v => town().keep = v),
-        el('p', 'Town buys X-Large potions using the Buy HP/MP switches, low-stock thresholds and refill counts above. Keep each low-stock threshold below its refill target. Potion selections apply to walking-route restock. Returns when the character bag has at most one free slot. Free at least two slots before hunting again; existing character items stay protected. Revival uses the saved town services and a reverse scroll, without using a return scroll in town. Pet loot passes through one reserved character bag slot. Potions, return/reverse scrolls, beginner speed scrolls and matching Keep names are protected. Refills travel scrolls to two where sold for gold; otherwise carry spares. F8 cancels.', 'muted'));
+        el('p', 'Town buys X-Large potions using the Buy HP/MP switches, low-stock thresholds and refill counts above. Keep each low-stock threshold below its refill target. Potion selections apply to walking-route restock. Returns when the character bag has at most one free slot. Free at least two slots before hunting again; existing character items stay protected. Revival uses the saved town services without a return scroll in town, then reverses or walks back. Pet loot passes through one reserved character bag slot. Potions, return/reverse scrolls, beginner speed scrolls and matching Keep names are protected. Refills travel scrolls to two where sold for gold; otherwise carry spares. F8 cancels.', 'muted'));
       this.townNote = el('p', Town.status(), 'muted'); services.append(this.townNote); host.append(services);
   },
   section_townAmmo(host) {
@@ -14926,9 +14954,9 @@ const UI = {
       this.autoStartNote = el('p', AutoStart.status(), 'muted');
       host.append(this.group('Behaviour',
         this.check('Start the bot when this character enters the game', () => H().autoStart, v => { H().autoStart = v; this.autoStartNote.textContent = AutoStart.status(); }),
-        el('p', 'About 5 seconds after the character is in the game: at the hunting spot it starts hunting; in the town of your saved town services it does them and reverses back (needs the scroll town cycle); anywhere else it walks back; dead, it revives first. Only once per entry. Stop, F8 or a reconnect cancel it.', 'muted'),
+        el('p', 'About 5 seconds after the character is in the game: at the hunting spot it starts hunting; in the town of your saved town services it does them and goes back (needs the scroll town cycle); anywhere else it walks back; dead, it revives first. Only once per entry. Stop, F8 or a reconnect cancel it.', 'muted'),
         this.autoStartNote,
-        ...(Town.autoRevive() ? [el('p', 'On death: the town cycle revives you in town and reverses back (Town → Scroll town cycle).', 'muted')]
+        ...(Town.autoRevive() ? [el('p', 'On death: the town cycle revives you in town and goes back (Town → Scroll town cycle).', 'muted')]
           : [this.select('On death', [['stop', 'Stop'], ['wait', 'Wait'], ['revive', 'Revive and walk back']], () => H().onDeath, v => H().onDeath = v)]),
         this.check('Rest when low', () => H().sit.enabled, v => { H().sit.enabled = v; this.draw(); }),
         ...(H().sit.enabled ? [
@@ -15741,7 +15769,8 @@ Activity.userMessage = function( entry ) {
 			sell: "Selling loot.", ammo: "Buying ammunition.", repair: "Repairing equipment.",
 			"close-smith": "Finished at the repair merchant.", "walk-gate": "Walking to the return point.",
 			"open-gate": "Opening return travel.", reverse: "Preparing to return to the hunting area.",
-			"reverse-wait": "Returning to the hunting area…"
+			"reverse-wait": "Returning to the hunting area…",
+			leave: "Finished town services; walking back to the hunting spot."
 		};
 		return phases[phase] || "Continuing town services.";
 	}

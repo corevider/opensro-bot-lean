@@ -152,13 +152,13 @@ const Reconnect = {
       return UI.toast(this.message, 'info', 4000);
     }
     // Back in the town of the saved services (a death while disconnected respawns there, or the drop came during a
-    // town trip) and far from the hunting spot: do the town services and reverse, as after a death, instead of walking.
+    // town trip) and far from the hunting spot: do the town services first, as after a death, then reverse or walk back.
     // The character may stand anywhere in town, so the services start from here instead of waiting at the scroll's
     // landing spot. Another town has none of the saved services: walk-back handles that.
     const H = Hunt.cfg(), spot = H.center && World.pose() ? dist2D(World.pose(), H.center) : NaN;
     const c = Town.cfg(), here = Town.detect(), home = Town.detect(c.vendor || c.storage || c.arrival || {});
     if (Town.autoRevive() && Number.isFinite(spot) && spot > Math.max(H.radius * 1.5, 600) && here && home && here.key === home.key) {
-      UI.toast('Back in the game, in town; doing town services and reversing to the hunting spot.', 'info', 4000);
+      UI.toast('Back in the game, in town; doing town services, then ' + (Town.reverses() ? 'reversing' : 'walking') + ' to the hunting spot.', 'info', 4000);
       Controller.returnAfterRevive();
       if (Town.trip?.phase === 'revive-arrival') Town.arrived();
       return this.clear(Town.trip ? '' : 'Back in the game, but the town cycle could not start: ' + Town.message);
