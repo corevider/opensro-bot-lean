@@ -5,6 +5,7 @@
 // walked in short legs: the game publishes collision data only for the 3x3
 // regions around the character, so each leg ends across the next region border.
 const WALK_LEG = 2400;           // game units; safely inside the 3x3 collision window
+const WALK_LEG_REACH = 240;  // a leg is done within this distance of its end
 const WALK_MAX_LEGS = 60;        // hard safety cap on chained legs for one return
 const WALK_MAX_MS = 30 * 60000;  // hard safety cap for the leg fallback
 const WALK_NAV_MS = 90 * 60000;  // absolute cap for a navdata route
@@ -224,7 +225,9 @@ const WalkBack = {
         return this.cancel('Walk back stopped: an obstacle blocks the way and I could not walk around it.');
       }
     }
-    const move = Navigation.next(a, a.leg ? a.leg.target : dest, a.recorded);
+    // A leg end only gives the direction: its neighbourhood will do, which spares
+    // searching for a point that may lie on a slope or a rock.
+    const move = a.leg ? Navigation.next(a, a.leg.target, a.recorded, WALK_LEG_REACH, true) : Navigation.next(a, dest, a.recorded);
     if (move.error && !move.waiting) {
       if (a.source === 'navdata') {
         if (this.replan(pose)) return;
@@ -233,6 +236,8 @@ const WalkBack = {
       if (this.detour(pose, dest)) return;
       return this.cancel(move.error);
     }
+    // The clipper is searching between frames: stand still, without counting it as no progress.
+    if (move.planning) { a.progressAt = now(); a.retryAt = now() + 250; return; }
     if (move.waiting) {
       // The leg can end early at the edge of the loaded window, before the
       // crossing that publishes the next one. Keep the progress made.

@@ -253,6 +253,8 @@ def release_notes():
     return 'const RELEASE_NOTES = ' + json.dumps(releases[:8], ensure_ascii=False) + ';'
 parts = [header, utils, (base / 'lean-settings.js').read_text(encoding='utf-8'), geometry,
          hook, display, world, commands, ticker, potion, attackable, combat, restock, hunt,
+         (base / 'lean-clipper.js').read_text(encoding='utf-8'),
+         (base / 'lean-clip-route.js').read_text(encoding='utf-8'),
          (base / 'lean-navigation.js').read_text(encoding='utf-8'),
          (base / 'lean-pursuit-navigation.js').read_text(encoding='utf-8'),
          (base / 'lean-navdata-index.js').read_text(encoding='utf-8'),

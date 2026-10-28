@@ -3,7 +3,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/bot.lean.user.js', 'utf8');
 const isolated = source.slice(0, source.lastIndexOf('installWorkerHook();')) +
-  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, Route, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, boot, Ticker, Sound, LeanMap};\n})();';
+  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, boot, Ticker, Sound, LeanMap};\n})();';
 function fixture(document) {
   let time = 100000;
   const storage = new Map(), commands = [], notices = [], intervals = [], timers = [];
@@ -945,19 +945,106 @@ test('walk-back chains short legs across regions and starts hunting 10 km away',
   const legLog = f.Log.lines.find(e => e.code === 'walk-leg');
   assert.ok(legLog, 'leg progress is logged'); assert.match(f.Activity.userMessage(legLog), /^Walking to the hunting spot: leg \d+ of about \d+\.$/);
 });
-test('a blocked leg end is snapped to a nearby walkable tile and the walk continues', () => {
+test('a blocked leg end is walked to its neighbourhood and the walk continues', () => {
   const f = fixture();
   f.Settings.profile.hunt.center = { regionId: 6, x: 500, y: 0, z: 100 };
   const blocked = new Uint8Array(9216);
   blocked[5 * 96 + 29] = 1; // the straight leg end, about (2500, 100) from the start
   f.Navigation.install(navWindow(1, blocked));
   f.WalkBack.start(true); f.WalkBack.tick();
-  assert.ok(f.WalkBack.active, 'the walk is not cancelled');
-  assert.equal(f.WalkBack.active.legTries, 1, 'the blocked end was replaced');
-  const local = f.Navigation.local(f.WalkBack.active.leg.target);
-  assert.equal(f.Navigation.open(local.x, local.z), true, 'the new leg end is walkable');
-  f.advance(1000); f.WalkBack.tick();
+  const a = f.WalkBack.active;
+  assert.ok(a, 'the walk is not cancelled');
+  // A leg end only gives the direction: no replacement end is searched for.
+  assert.equal(a.legTries, 0, 'the leg end is kept');
+  const end = f.Navigation.local(a.travel.route.at(-1)), target = f.Navigation.local(a.leg.target);
+  assert.equal(f.Navigation.open(end.x, end.z), true, 'the route ends on a walkable tile');
+  assert.ok(Math.hypot(end.x - target.x, end.z - target.z) <= 240, 'near the leg end');
   assert.equal(f.commands.at(-1).kind, 'move');
+});
+// The game's clipper stands in as a fake: it walks every move except those its barrier
+// stops, so it can disagree with the flat grid both ways (lean-clip-route.js).
+function fakeClipper(f, barrier = () => false) {
+  const clipper = { clips: 0, install() {}, clip(from, to) { clipper.clips++; return barrier(from, to) ? { ...from } : { ...to, y: from.y }; } };
+  f.ClipRoute.clipper = clipper; f.ClipRoute.ready = true; f.ClipRoute.moves = new Map();
+  return clipper;
+}
+const touches = (a, b, x) => Math.min(a.x, b.x) <= x && Math.max(a.x, b.x) >= x && a.x !== b.x;
+test('the clipper keeps a flat route it walks', () => {
+  const f = fixture(); f.Navigation.install(navWindow(1));
+  const clipper = fakeClipper(f), to = { regionId: 1, x: 900, y: 0, z: 400 };
+  assert.equal(JSON.stringify(f.Navigation.plan({ regionId: 1, x: 100, y: 0, z: 100 }, to)), JSON.stringify([to]));
+  assert.ok(clipper.clips > 0, 'the route was checked');
+});
+test('the clipper plans around a wall the flat grid does not know, and never returns the flat route through it', () => {
+  const f = fixture(); f.Navigation.install(navWindow(1));
+  const wall = (a, b) => touches(a, b, 1000) && Math.min(a.z, b.z) < 1100;
+  fakeClipper(f, wall);
+  const from = { regionId: 1, x: 900, y: 0, z: 900 }, route = f.Navigation.plan(from, { regionId: 1, x: 1100, y: 0, z: 900 });
+  assert.ok(route.length > 1);
+  let p = from;
+  for (const q of route) {
+    const n = Math.max(1, Math.ceil(Math.hypot(q.x - p.x, q.z - p.z) / 40));
+    for (let i = 1; i <= n; i++) assert.ok(!wall(p, { x: p.x + (q.x - p.x) * i / n, z: p.z + (q.z - p.z) * i / n }), 'no step crosses the wall');
+    p = q;
+  }
+  fakeClipper(f, (a, b) => touches(a, b, 500));
+  assert.equal(f.Navigation.plan({ regionId: 1, x: 100, y: 0, z: 100 }, { regionId: 1, x: 900, y: 0, z: 400 }).length, 0, 'a stopped flat route is not walked');
+});
+test('the clipper walks a floor the flat grid sees as closed', () => {
+  const f = fixture(), blocked = new Uint8Array(9216);
+  for (let tz = 0; tz < 96; tz++) blocked[tz * 96 + 50] = 1;
+  f.Navigation.install(navProduct([], blocked));
+  const from = { regionId: 1, x: 800, y: 0, z: 400 }, to = { regionId: 1, x: 1200, y: 0, z: 400 };
+  assert.equal(f.Navigation.plan(from, to)?.length ?? 0, 0, 'the flat grid is closed');
+  fakeClipper(f, (a, b) => touches(a, b, 1010) && !(a.z >= 520 && a.z <= 600 && b.z >= 520 && b.z <= 600));
+  const route = f.Navigation.plan(from, to);
+  assert.ok(route.length > 1 && route.every(p => Number.isFinite(p.y)));
+});
+test('pursuit and detour candidates plan on the flat grid alone, without clipper searches', () => {
+  const f = fixture(); f.Navigation.install(navWindow(1));
+  const clipper = fakeClipper(f, (a, b) => touches(a, b, 500));
+  const route = f.Navigation.plan({ regionId: 1, x: 100, y: 0, z: 100 }, { regionId: 1, x: 900, y: 0, z: 400 }, 0, { clip: false });
+  assert.equal(route.length, 1, 'the flat route, unchecked');
+  assert.equal(clipper.clips, 0);
+});
+test('a long clipper search is answered later, slice by slice, while the walker waits', () => {
+  const f = fixture(); f.Navigation.install(navWindow(1));
+  // Each clip takes a millisecond, so a search spans several 5 ms slices.
+  const wall = (a, b) => touches(a, b, 1000) && Math.min(a.z, b.z) < 1100;
+  const clipper = fakeClipper(f, wall), clip = clipper.clip;
+  clipper.clip = (...args) => { f.advance(1); return clip(...args); };
+  f.World.gp.pose = { regionId: 1, x: 900, y: 0, z: 900 };
+  const owner = {}, goal = { regionId: 1, x: 1100, y: 0, z: 900 };
+  const first = f.Navigation.next(owner, goal);
+  assert.equal(first.planning, true, 'still searching');
+  for (let n = 0; n < 200 && f.timers.length; n++) f.timers.shift().fn();
+  const move = f.Navigation.next(owner, goal);
+  assert.ok(move.point, 'the route is ready');
+  assert.ok(owner.travel.route.length > 1);
+});
+test('a destination the clipper cannot reach is not searched again at once', () => {
+  const f = fixture(); f.Navigation.install(navWindow(1));
+  const clipper = fakeClipper(f, (a, b) => touches(a, b, 500));
+  const from = { regionId: 1, x: 100, y: 0, z: 100 }, to = { regionId: 1, x: 900, y: 0, z: 400 };
+  assert.equal(f.Navigation.plan(from, to).length, 0);
+  const clips = clipper.clips;
+  assert.equal(f.Navigation.plan(from, to).length, 0);
+  assert.ok(clipper.clips - clips < 20, 'only the flat route was checked again');
+  f.advance(31000);
+  f.Navigation.plan(from, to);
+  assert.ok(clipper.clips - clips > 20, 'searched again after 30 s');
+});
+test('a search that failed only around avoided spots does not hold back the plain one', () => {
+  const f = fixture(); f.Navigation.install(navWindow(1));
+  // The clipper's only way across x = 1000 is the gap at z 1000-1080, off the straight line
+  // and covered by the avoided spot; it keeps the walker in the home region, so no other
+  // region's gap offers a way.
+  const wall = (a, b) => a.regionId !== 1 || b.regionId !== 1 || touches(a, b, 1000) && !(Math.min(a.z, b.z) >= 1000 && Math.max(a.z, b.z) <= 1080);
+  fakeClipper(f, wall);
+  const from = { regionId: 1, x: 900, y: 0, z: 900 }, to = { regionId: 1, x: 1100, y: 0, z: 900 };
+  assert.equal(f.Navigation.plan(from, to, 0, { avoid: [{ regionId: 1, x: 1000, y: 0, z: 1040, r: 80 }] }).length, 0, 'no way around the avoided spot');
+  const plain = f.Navigation.plan(from, to);
+  assert.ok(plain.length > 0, 'the plain search still runs');
 });
 // An object the collision map does not know about: the character stops against it while moves are sent.
 function pillarWorld(f, pillar = { x: 270, z: 100, r: 15 }) {

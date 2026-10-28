@@ -1,11 +1,14 @@
 // Outdoor routing over the collision product already admitted by the game.
 // A 20-unit A* grid respects blocked terrain, object walls and linked portals.
+// Every route is then checked with the game's own clipper, and planned with it
+// where the flat grid is wrong (lean-clip-route.js).
 // Native movement remains the final authority for height and collision response.
 const STALL_MS = 2500;      // standing still this long while moves are sent counts as a stall
 const STALL_TRIES = 4;      // sidesteps tried at one spot before the walk gives up
 const AVOID_AHEAD = 36;     // the suspected obstacle sits this far ahead of the stalled character
 const AVOID_RADIUS = 28;    // and is kept out of the next route by this much
 const AVOID_MS = 45000;
+const FLAT_NODES_WITH_CLIPPER = 2500;  // flat A* budget when the clipper can take over
 const Navigation = {
   scene: null, revision: 0, error: '', avoidNow: null,
   bytes(value, size) {
@@ -16,7 +19,7 @@ const Navigation = {
   capture(command) {
     const c = command?.command || command;
     if (c?.kind !== 'navigation') return;
-    try { this.install(c.bundle); } catch (e) { this.scene = null; this.error = e.message; Log.warn('Walk-back navigation: ' + e.message); }
+    try { this.install(c.bundle); } catch (e) { this.scene = null; this.error = e.message; ClipRoute.reset(); Log.warn('Walk-back navigation: ' + e.message); }
   },
   install(product) {
     if (!product?.complete || (product.regionId & DUNGEON)) throw Error('Outdoor collision data required');
@@ -69,6 +72,7 @@ const Navigation = {
       }
     }
     this.scene = scene; this.error = ''; this.revision++;
+    ClipRoute.install(product);
   },
   local(p) {
     const d = regionDelta({ regionId: this.scene.regionId, x: 0, z: 0 }, p);
@@ -122,8 +126,23 @@ const Navigation = {
     const start = this.local(from), goal = this.local(to);
     // Spots a stalled walk bumped into are kept out of the route, but never the start itself.
     const avoid = (options.avoid || []).map(a => ({ ...this.local(a), r: a.r })).filter(a => Number.isFinite(a.x) && start && Math.hypot(a.x - start.x, a.z - start.z) >= a.r);
+    // The clipper is already searching this way between frames: no flat search again.
+    if (options.clip !== false && ClipRoute.ready && Number.isFinite(from.y) && ClipRoute.busy(from, to, arrivalRadius, avoid)) {
+      return ClipRoute.plan(from, to, arrivalRadius, avoid);
+    }
     this.avoidNow = avoid.length ? avoid : null;
-    try { return this.planLocal(from, to, start, goal, arrivalRadius, options); } finally { this.avoidNow = null; }
+    // With the clipper behind it, the flat search stays short: a way it does not find
+    // quickly is searched by the clipper, in slices, instead of in one long freeze.
+    const clipping = options.clip !== false && ClipRoute.ready && Number.isFinite(from.y);
+    const flat = clipping ? { ...options, maxNodes: Math.min(options.maxNodes ?? Infinity, FLAT_NODES_WITH_CLIPPER) } : options;
+    let route;
+    try { route = this.planLocal(from, to, start, goal, arrivalRadius, flat); } finally { this.avoidNow = null; }
+    // The clipper checks the flat route and plans where the flat grid is wrong. A flat
+    // route it stops is never walked: it would run into a wall. Callers that plan often
+    // (pursuit, detour candidates) keep the flat grid alone: options.clip false.
+    if (options.clip === false || !ClipRoute.ready || !Number.isFinite(from.y) || !goal || !this.covered(goal.x, goal.z)) return route;
+    if (route?.length && ClipRoute.walks(from, route)) return route;
+    return ClipRoute.plan(from, to, arrivalRadius, avoid);
   },
   planLocal(from, to, start, goal, arrivalRadius, options) {
     if (!start || !goal || !this.open(start.x, start.z)) return null;
@@ -222,7 +241,7 @@ const Navigation = {
       if (turned) candidates.push(turned);
     }
     for (const candidate of candidates) {
-      const route = this.plan(from, candidate, 0, { maxNodes: options.maxNodes ?? 20000 });
+      const route = this.plan(from, candidate, 0, { maxNodes: options.maxNodes ?? 20000, clip: false });
       if (route?.length && dist2D(route[route.length - 1], candidate) <= 15) return candidate;
     }
     return null;
@@ -276,7 +295,9 @@ const Navigation = {
         }
     return false;
   },
-  next(owner, destination, recorded = false, arrivalRadius = 0) {
+  // near: the destination only gives a direction (a walk-back leg end); reaching within
+  // arrivalRadius of it is the plan, not a fallback.
+  next(owner, destination, recorded = false, arrivalRadius = 0, near = false) {
     const pose = World.pose(), previous = owner.travel;
     if (!this.scene || (pose.regionId & DUNGEON)) {
       return recorded ? { point: destination } : { waiting: true, error: this.error || 'Waiting for game collision data. Reload the game if attached late, or record a walking route.' };
@@ -284,13 +305,19 @@ const Navigation = {
     if (!previous || previous.revision !== this.revision || dist2D(previous.destination, destination) > 1 || previous.index >= previous.route.length) {
       const avoid = (owner.avoid || []).filter(a => a.until > now());
       const attempt = options => {
+        if (near) return this.plan(pose, destination, arrivalRadius, options);
         let route = this.plan(pose, destination, 0, options);
-        if (route && !route.length && arrivalRadius > 0) route = this.plan(pose, destination, arrivalRadius, options);
+        if (route && route !== CLIP_PENDING && !route.length && arrivalRadius > 0) route = this.plan(pose, destination, arrivalRadius, options);
         return route;
       };
       let route = attempt({ avoid });
+      // The clipper is still searching, between frames: wait for it.
+      if (route === CLIP_PENDING) return { waiting: true, planning: true, error: 'Finding a way through the game collision.' };
       // Avoided spots are only a hint: if they leave no route, walk the plain one rather than nothing.
-      if (avoid.length && !route?.length) route = attempt({});
+      if (avoid.length && !route?.length) {
+        route = attempt({});
+        if (route === CLIP_PENDING) return { waiting: true, planning: true, error: 'Finding a way through the game collision.' };
+      }
       if (!route?.length) {
         const out = this.stepOut(pose);
         if (out) { owner.travel = null; return { point: out, stepOut: true }; }

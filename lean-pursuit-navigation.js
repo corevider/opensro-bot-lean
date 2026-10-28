@@ -87,7 +87,8 @@ Navigation.query = function( from, to, maxNodes = PURSUIT_NAV.nodes ) {
 	if ( start === "blocked" ) return { status: "invalid-start", route: [] };
 	if ( this.segment( from, to ) ) return { status: "direct", route: [ to ] };
 	const result = {};
-	const route = this.plan( from, to, 0, { maxNodes, maxChord: PURSUIT_NAV.chord, result } );
+	// Pursuit plans many times a fight: the flat grid alone, never a clipper search.
+	const route = this.plan( from, to, 0, { maxNodes, maxChord: PURSUIT_NAV.chord, result, clip: false } );
 	if ( !route?.length ) {
 		return { status: result.limited ? "search-limit" : "unreachable", route: [], visited: result.visited };
 	}
