@@ -426,7 +426,7 @@ const Town = {
     if (!Hunt.cfg().center) return this.fail('No saved hunting spot to walk back to.');
     this.trip = null; Hunt.targetGid = Hunt.lootGid = 0; this.restartClocks();
     WalkBack.start(true);
-    if (!WalkBack.active) { this.message = 'Town cycle stopped: the walk back to the hunting spot did not start.'; Hunt.stop(this.message); return; }
+    if (!WalkBack.active && !Travel.active) { this.message = 'Town cycle stopped: the walk back to the hunting spot did not start.'; Hunt.stop(this.message); return; }
     this.message = 'Town service complete; walking back to the hunting spot.';
     Log.info(this.message); UI.toast(this.message);
   },

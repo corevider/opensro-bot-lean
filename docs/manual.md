@@ -286,7 +286,11 @@ The **×** at the top right of the panel, or **F6**, minimises it to a small ico
 
 A long walk back follows a corridor from the converted route data, which was made from another map and is wrong in places (a slope it climbs can be a cliff here). Before walking it, the bot asks the game for the collision of each region on the way, the same data the game loads when you get there, and walks every step of the corridor with the game's own movement rules. A step that does not walk is left out and the corridor is planned again around it, so the walk takes a way that exists, for example round the rim from Hotan to the Karakoram aircraft dock instead of through the crater. While it checks, the status says so and the character waits; a long corridor takes a few seconds to a minute. On the way, a corridor point the character cannot stand on (a rock edge) is passed close by or skipped. If the game's asset loader was not seen (the bot attached after the game started), the corridor is walked unchecked, as before.
 
-This is beta: it was tested on the Hotan to Karakoram aircraft dock route. If a walk takes an odd way, send the log; the **Route check** lines show what was checked and left out.
+## Teleports and ferries on the way back (beta)
+
+When the hunting spot cannot be reached on foot from where the character stands (across a river, or between parts of the map with no walking connection), walking back uses the game's teleporters and ferries, the same ones you would click. Hotan to the western bank, for example, walks to the ferry on the Hotan side, pays its fee, crosses, and walks on to the spot. The bot picks the cheapest mix of walking and hops it can afford, selects the teleporter, waits for its menu and asks for the destination, exactly as the menu does. A teleporter that refuses (not enough gold, level too low, a trade cart) is left out and another way is tried; with no other way the walk stops and says why. A world change other than the hop itself, manual control, Stop or F8 ends the trip. Switch it off with **Walking back may use teleports and ferries (beta)** under **Combat → Hunting area**; then such a walk stops as before. The bot stops about 15 m from the teleporter, within talking range, because many stand on a dock or a ship.
+
+Both are beta: they were tested on the Hotan to Karakoram aircraft dock route. If a walk takes an odd way, send the log; the **Route check** and **Travel** lines show what was checked and used.
 
 ## If a town trip stalls on the way to a merchant
 

@@ -3,7 +3,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/bot.lean.user.js', 'utf8');
 const isolated = source.slice(0, source.lastIndexOf('installWorkerHook();')) +
-  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, boot, Ticker, Sound, LeanMap};\n})();';
+  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, Travel, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, boot, Ticker, Sound, LeanMap};\n})();';
 function fixture(document) {
   let time = 100000;
   const storage = new Map(), commands = [], notices = [], intervals = [], timers = [];
@@ -3129,6 +3129,85 @@ test('resume hunting in town says it walks back when no reverse scroll is carrie
   f.Settings.profile.hunt.center = { regionId: 1, x: 1500, y: 0, z: 100 }; f.World.gp.pose.x = 60;
   assert.equal(f.Controller.resumeHunting('Back in the game'), 'town');
   assert.ok(f.Town.trip, f.Town.message); assert.ok(f.notices.some(n => /then walking to the hunting spot/.test(n)), f.notices.join(' | '));
+});
+test('travel plans Hotan to a spot across the western river through the ferry, and walks when it can', () => {
+  const f = fixture(), hotan = { regionId: 23687, x: 844, y: 0, z: 1055 }, spot = { regionId: 22388, x: 1130, y: 0, z: 1730 };
+  const steps = f.Travel.plan(hotan, spot);
+  assert.ok(steps, 'a route exists');
+  assert.equal(steps.map(s => s.kind).join(), 'walk,hop,walk');
+  const hop = steps[1];
+  assert.ok([20, 21].includes(hop.from.id), 'boards a ferry on the Hotan bank (SN_ZONE_25031)');
+  assert.ok([22, 23].includes(hop.to.id), 'lands on the western bank (SN_ZONE_25033)');
+  assert.equal(hop.fee, 500); assert.equal(steps[0].to, hop.from.pose); assert.deepEqual(steps[2].to, spot);
+  f.World.gp.progression.gold = '499';
+  assert.equal(f.Travel.plan(hotan, spot), null, 'an unaffordable ferry is never planned');
+  f.World.gp.progression.gold = '100000';
+  const banned = new Set(['20>22', '20>23', '21>22', '21>23']), detour = f.Travel.plan(hotan, spot, banned);
+  assert.ok(detour, 'another crossing further north is found');
+  assert.equal(detour.some(s => s.kind === 'hop' && banned.has(s.from.id + '>' + s.to.id)), false, 'refused links stay out');
+  assert.ok(detour.filter(s => s.kind === 'hop').length >= 2);
+  assert.equal(f.Travel.begin(hotan, { ...hotan, x: 1500 }, false), false, 'a walkable spot stays a plain walk');
+  f.Settings.profile.hunt.travel = false; assert.equal(f.Travel.begin(hotan, spot, false), false, 'switched off');
+  assert.equal(f.Travel.nodes().get(11).label, 'the Hotan world statue', 'town statues are placed from the town table');
+});
+function travelFixture() {
+  const f = fixture(); f.UI.mount = f.UI.draw = f.UI.update = f.Ticker.start = () => {}; f.boot();
+  const near = { regionId: 1, x: 300, y: 0, z: 100 }, far = { regionId: 5, x: 300, y: 0, z: 100 }, spot = { regionId: 5, x: 900, y: 0, z: 100 };
+  f.Travel.places = new Map([[1, { id: 1, refObjId: 900, label: 'the teleporter', pose: near }], [2, { id: 2, refObjId: 901, label: 'the teleporter', pose: far }]]);
+  f.Travel.links = () => [[1, 2, 500]];
+  f.Travel.walkable = (a, b) => (a.regionId === 5) === (b.regionId === 5);
+  f.Route.setAreas([]);
+  f.World.ents.set(77, { gid: 77, kind: 'npc', refObjId: 900, regionId: 1, x: 310, y: 0, z: 100 });
+  f.Settings.profile.hunt.center = { ...spot };
+  return { ...f, near, far, spot };
+}
+test('travel walks to the teleporter, opens its menu, hops, walks on and resumes hunting', () => {
+  const f = travelFixture(), gp = f.World.gp;
+  f.WalkBack.start(true);
+  assert.ok(f.Travel.active, f.notices.join(' | ')); assert.equal(f.WalkBack.active.label, 'the teleporter');
+  gp.pose = { ...f.near }; f.Controller.tick();
+  assert.equal(f.WalkBack.active, null); assert.equal(f.Travel.active.phase, 'select');
+  f.Controller.tick(); assert.equal(f.commands.at(-1).kind, 'select'); assert.equal(f.commands.at(-1).gid, 77);
+  gp.target = 77; gp.targetCapabilities = 0x80; gp.npcConversation = { gid: 77, phase: 'menu' };
+  f.advance(1000); f.Controller.tick(); f.Controller.tick();
+  const hop = f.commands.find(c => c.kind === 'travel-gate');
+  assert.ok(hop, 'the portal request is sent'); assert.equal(hop.gid, 77); assert.equal(hop.type, 2); assert.equal(hop.target, 2);
+  f.bus.emit('phase', 'entering-world'); assert.ok(f.Travel.active, 'the load screen is expected');
+  f.World.phase = 'world'; gp.pose = { ...f.far }; f.advance(3000); f.Controller.tick();
+  assert.ok(f.WalkBack.active, 'walks on from the landing'); assert.equal(f.WalkBack.active.label, 'the hunting spot');
+  gp.pose = { ...f.spot }; f.Controller.tick();
+  assert.equal(f.Travel.active, null); assert.equal(f.WalkBack.active, null); assert.equal(f.Hunt.running, true);
+});
+test('a refused or unanswered hop is left out; with no other way the trip stops with the reason', () => {
+  let f = travelFixture(), gp = f.World.gp;
+  f.WalkBack.start(true); gp.pose = { ...f.near }; f.Controller.tick(); f.Controller.tick();
+  gp.target = 77; gp.targetCapabilities = 0x80; gp.npcConversation = { gid: 77, phase: 'menu' };
+  f.Controller.tick(); f.Controller.tick(); assert.equal(f.Travel.active.phase, 'arrive');
+  f.bus.emit('notice', { sequence: 1, key: 'UIIT_MSG_INTERACTION_FAIL_NOT_ENOUGH_MONEY' }); f.Controller.tick();
+  assert.equal(f.Travel.active, null); assert.match(f.Travel.message, /not enough gold/); assert.equal(f.Hunt.running, false);
+  f = travelFixture(); gp = f.World.gp;
+  f.WalkBack.start(true); gp.pose = { ...f.near }; f.Controller.tick(); f.Controller.tick();
+  gp.target = 77; gp.targetCapabilities = 0x80; gp.npcConversation = { gid: 77, phase: 'menu' };
+  f.Controller.tick(); f.Controller.tick(); f.advance(16000); f.Controller.tick();
+  assert.equal(f.Travel.active, null); assert.match(f.Travel.message, /no answer from the game/);
+  f = travelFixture(); gp = f.World.gp;
+  f.WalkBack.start(true); gp.pose = { ...f.near }; f.Controller.tick(); f.Controller.tick();
+  gp.target = 77; gp.targetCapabilities = 0x01; f.Controller.tick();
+  assert.equal(f.Travel.active, null); assert.match(f.Travel.message, /offers no teleport/);
+  assert.equal(f.commands.some(c => c.kind === 'travel-gate'), false);
+});
+test('a world change during a travel walk, manual control or Stop end the trip without a hop', () => {
+  let f = travelFixture();
+  f.WalkBack.start(true); f.bus.emit('phase', 'entering-world');
+  assert.equal(f.Travel.active, null); assert.equal(f.WalkBack.active, null); assert.match(f.Travel.message, /unexpected travel/);
+  f = travelFixture(); f.WalkBack.start(true); f.World.gp.pose = { ...f.near }; f.Controller.tick();
+  f.Manual.lastAt = 123; f.Controller.tick(); assert.equal(f.Travel.active, null); assert.match(f.Travel.message, /manual control/);
+  f = travelFixture(); f.WalkBack.start(true); f.World.gp.pose = { ...f.near }; f.Controller.tick();
+  f.toggleBot(); assert.equal(f.Travel.active, null); assert.equal(f.Hunt.running, false);
+  f = travelFixture(); f.WalkBack.start(true);
+  f.AutoStart.entry = { at: 0 }; f.Settings.profile.hunt.autoStart = true; f.AutoStart.tick();
+  assert.equal(f.AutoStart.entry, null, 'auto-start never starts the bot during a trip');
+  assert.ok(f.Travel.active);
 });
 test('abnormal pill restocking uses only the strongest universal pill and preserves existing profiles', () => {
   const f = fixture(), r = f.Restock.cfg();

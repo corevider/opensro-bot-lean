@@ -110,7 +110,8 @@ function stopAll() {
   Resurrect.cancelTrip('', true);
   Resurrect.holdUntil = 0;
   Controller.resumeAfterRevive = false;
-  const active = townActive || Hunt.running || Restock.trip || WalkBack.active || Loot.active;
+  const active = townActive || Hunt.running || Restock.trip || WalkBack.active || Travel.active || Loot.active;
+  Travel.cancel();
   WalkBack.cancel('', false);
   if (Hunt.running) Hunt.stop();
   Restock.trip = null;
@@ -170,7 +171,7 @@ const Controller = {
     const H = Hunt.cfg(), pose = World.pose(), distance = H.center && pose ? dist2D(pose, H.center) : Infinity;
     if (Number.isFinite(distance) && distance <= Math.max(H.radius * 1.5, 600)) { UI.toast(prefix + '; resuming hunting.', 'info', 4000); Hunt.start(); return 'started'; }
     if (this.townReturn()) { UI.toast(prefix + ', in town: doing town services, then ' + (Town.reverses() ? 'reversing' : 'walking') + ' to the hunting spot.', 'info', 4000); return 'town'; }
-    if (Number.isFinite(distance)) { UI.toast(prefix + '; walking back to the hunting spot.', 'info', 4000); WalkBack.start(true); return WalkBack.active ? 'walking' : 'stopped'; }
+    if (Number.isFinite(distance)) { UI.toast(prefix + '; walking back to the hunting spot.', 'info', 4000); WalkBack.start(true); return WalkBack.active || Travel.active ? 'walking' : 'stopped'; }
     UI.toast(prefix + ', but not at the hunting spot. Use Return & hunt when ready.', 'warn', 6000);
     return 'stopped';
   },
@@ -243,14 +244,15 @@ const Controller = {
       if (SpeedScroll.tick()) { this.mode = 'speed scroll'; return; }
       if (this.guard('Repair hammer', () => RepairHammer.tick())) { this.mode = 'repair hammer'; return; }
       if (Trade.tick()) { this.mode = 'trading'; return; }
-      if (!WalkBack.active && !Restock.trip && !Restock.recording && !Controller.resumeAfterRevive &&
+      if (!WalkBack.active && !Travel.active && !Restock.trip && !Restock.recording && !Controller.resumeAfterRevive &&
           !Restock.activeShop() && !World.gp.storage && Resurrect.tick()) {
         this.mode = 'resurrect'; return;
       }
-      if (!WalkBack.active && !Restock.trip && !Restock.recording && !Restock.activeShop() && !World.gp.storage && Support.tick()) {
+      if (!WalkBack.active && !Travel.active && !Restock.trip && !Restock.recording && !Restock.activeShop() && !World.gp.storage && Support.tick()) {
         this.mode = 'party support'; return;
       }
       if (WalkBack.active) { this.mode = 'returning'; WalkBack.tick(); }
+      else if (Travel.active) { this.mode = 'travelling'; Travel.tick(); }
       else if (Restock.recording) this.mode = 'recording';
       else if (Hunt.running) { if (!Trace.tick()) Hunt.tick(); this.mode = Restock.trip ? 'shopping' : Hunt.state; }
       else { this.guard('Idle pet pickup', () => Loot.idleTick()); this.mode = 'idle'; }

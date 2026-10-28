@@ -38,6 +38,8 @@ const WalkBack = {
       if (nearest >= 0) route = recorded.slice(nearest).map(p => ({ ...p }));
     }
     route.push({ ...dest });
+    // Across water or between unconnected areas: teleports and ferries (lean-travel.js) take over.
+    if (Travel.begin(pose, dest, shouldResume)) return;
     this.launch(dest, route, pose, shouldResume);
   },
   // Walk anywhere, not just to the hunting spot (Trade uses this between towns). The caller owns the safety checks

@@ -30,7 +30,7 @@ const AutoStart = {
     const entry = this.entry;
     if (!entry) return;
     if (Reconnect.active()) return this.cancel('Auto-start skipped: reconnect is bringing the bot back.');
-    if (Hunt.running || Town.trip || WalkBack.active || Trade.run || Alchemy.run || Alchemy.pending || Restock.recording) return this.cancel();
+    if (Hunt.running || Town.trip || WalkBack.active || Travel.active || Trade.run || Alchemy.run || Alchemy.pending || Restock.recording) return this.cancel();
     if (now() - entry.at > AUTO_START_GIVE_UP_MS) return this.cancel('Auto-start gave up: the game did not settle within 2 minutes.');
     if (World.charName && Settings.profileKey !== 'profile:' + World.charName) { this.message = 'Auto-start: waiting for the character settings.'; return; }
     if (!this.on()) { this.entry = null; return; }
@@ -57,7 +57,7 @@ const AutoStart = {
     }
     Controller.resumeHunting('Auto-start');
     this.message = Town.trip ? 'Auto-start: in town. Doing town services, then back to the hunting spot.'
-      : WalkBack.active ? 'Auto-start: walking to the hunting spot.'
+      : WalkBack.active || Travel.active ? 'Auto-start: walking to the hunting spot.'
       : Hunt.running ? 'Auto-start: hunting started at the hunting spot.'
       : 'Auto-start: the bot could not start. ' + (Town.message.startsWith('Town cycle stopped:') ? Town.message : 'Check the log.');
     Log.info(this.message);

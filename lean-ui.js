@@ -245,7 +245,7 @@ const UI = {
       : Resurrect.trip ? 'Resurrecting' : BuffGear.run ? 'Buff gear' : Trade.run ? 'Trading' : Alchemy.run || Alchemy.pending ? 'Alchemy' : '';
     const label = dead ? 'Dead' : error ? 'Error' : busy || (Hunt.running ? 'Hunting' : 'Stopped');
     // `note` is what only the state can say; the icon falls back to the first wait reason, which the wide window shows below the strip.
-    const note = Town.trip ? Town.status() : WalkBack.active ? WalkBack.status() : Reconnect.active() && Reconnect.message ? Reconnect.message
+    const note = Town.trip ? Town.status() : Travel.active ? Travel.status() : WalkBack.active ? WalkBack.status() : Reconnect.active() && Reconnect.message ? Reconnect.message
       : Restock.recording ? 'Recording route: ' + Restock.draft.route.length + ' points' : '';
     const reason = note || (this.waitNote?.textContent || '').split('\n')[0];
     return { key: dead || error ? 'stop' : busy ? 'busy' : Hunt.running ? 'ok' : 'stop', label, dead, note, reason };
@@ -705,6 +705,8 @@ const UI = {
         this.number('Hunt radius (m)', () => H().radius / 10, v => H().radius = v * 10, 5, 200),
         this.number('Chase distance (m)', () => H().chase / 10, v => H().chase = v * 10, 10, 300),
         this.check('Return when idle', () => H().returnToCenter, v => H().returnToCenter = v),
+        this.check('Walking back may use teleports and ferries (beta; pays their fee)', () => H().travel !== false, v => H().travel = v),
+        el('p', 'Beta: a long walk back is first checked against the game map, and teleports and ferries are used where walking cannot get there. If a route looks wrong, send the log.', 'muted'),
         this.check('Avoid other players’ targets', () => H().avoidKs, v => H().avoidKs = v),
         this.number('Minimum mob level (0 = any)', () => H().levelMin, v => H().levelMin = v, 0, 140),
         this.number('Maximum mob level (0 = any)', () => H().levelMax, v => H().levelMax = v, 0, 140),
