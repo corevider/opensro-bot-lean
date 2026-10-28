@@ -10,6 +10,8 @@ const WALK_MAX_LEGS = 60;        // hard safety cap on chained legs for one retu
 const WALK_MAX_MS = 30 * 60000;  // hard safety cap for the leg fallback
 const WALK_NAV_MS = 90 * 60000;  // absolute cap for a navdata route
 const WALK_PLAN_MS = 6000;       // wait this long for route data before falling back
+const WALK_NAV_REACH = 60;       // a navdata waypoint is passed within this: it may stand on a rock edge
+const WALK_NAV_SKIPS = 2;        // unreachable navdata waypoints skipped in a row before re-planning
 
 const WalkBack = {
   active: null,
@@ -66,17 +68,17 @@ const WalkBack = {
     const navWorth = distance > WALK_LEG && !!routeArea &&
       !(pose.regionId & DUNGEON) && !(dest.regionId & DUNGEON);
     if (!navWorth) return this.useLegs();
+    // With the game's asset worker the corridor is checked against the real collision first (lean-route-check.js).
+    const check = RouteCheck.available();
     let planned = null;
-    try { planned = Route.plan(pose, dest); } catch { planned = null; }
+    if (!check) { try { planned = Route.plan(pose, dest); } catch { planned = null; } }
     if (planned) return this.useNav(planned, pose);
     const a = this.active, token = {};
-    a.plan = { at: now(), token };
+    a.plan = { at: now(), token, limit: check ? CHECK_MS + 5000 : WALK_PLAN_MS };
     a.source = 'planning';
-    Log.info('Route: loading navdata for ' + routeArea.name + '.');
-    Route.ensure(pose, dest).then(ok => {
+    Log.info('Route: loading navdata for ' + routeArea.name + (check ? ' and checking it against the game map.' : '.'));
+    Route.checked(pose, dest).then(next => {
       if (this.active !== a || a.plan?.token !== token) return;
-      let next = null;
-      try { next = ok ? Route.plan(World.pose(), dest) : null; } catch { next = null; }
       if (next) this.useNav(next, World.pose());
       else this.useLegs();
     }, () => {
@@ -100,7 +102,7 @@ const WalkBack = {
     a.source = 'navdata';
     a.routeArea = route.area;
     a.routeLength = route.length + (dist2D(route.points[route.points.length - 1], a.destination) || 0);
-    a.index = 0; a.travel = null; a.leg = null; a.legTries = 0;
+    a.index = 0; a.skips = 0; a.travel = null; a.leg = null; a.legTries = 0;
     a.progressAt = now(); a.lastPose = { ...pose }; a.best = dist2D(pose, a.destination); a.bestAt = now();
     a.maxMs = Math.max(WALK_MAX_MS, Math.min(WALK_NAV_MS, a.routeLength / 20 * 1000 * 2));
     a.plan = null;
@@ -117,7 +119,7 @@ const WalkBack = {
       return false;
     }
     a.route = a.legRoute; a.recorded = a.legRecorded; a.source = 'legs';
-    a.index = 0; a.travel = null; a.leg = null; a.legTries = 0;
+    a.index = 0; a.skips = 0; a.travel = null; a.leg = null; a.legTries = 0;
     a.totalLegs = Math.max(1, Math.ceil(a.distance / WALK_LEG)); a.legs = 0;
     a.maxMs = WALK_MAX_MS; a.plan = null;
     a.progressAt = now(); a.lastPose = { ...pose }; a.best = dist2D(pose, a.destination); a.bestAt = now();
@@ -134,7 +136,7 @@ const WalkBack = {
     try { route = Route.plan(pose, a.destination); } catch { return false; }
     if (!route?.points?.length) return false;
     a.route = [...route.points.map(p => ({ ...p })), { ...a.destination }];
-    a.index = 0; a.travel = null; a.leg = null; a.legTries = 0;
+    a.index = 0; a.skips = 0; a.travel = null; a.leg = null; a.legTries = 0;
     a.progressAt = now(); a.lastPose = { ...pose }; a.best = dist2D(pose, a.destination); a.bestAt = now();
     Log.info('Route: re-planned from the current position with ' + route.points.length + ' waypoints.');
     return true;
@@ -143,7 +145,7 @@ const WalkBack = {
   status() {
     const a = this.active;
     if (!a) return '';
-    if (a.source === 'planning') return 'Walking to ' + a.label + ': loading route data.';
+    if (a.source === 'planning') return 'Walking to ' + a.label + ': ' + (RouteCheck.message || 'loading route data') + '.';
     const left = dist2D(World.pose(), a.destination);
     const progress = Number.isFinite(left) && a.distance ? ' · ' + Math.round(left / 10) + ' m left' : '';
     if (a.source === 'navdata') {
@@ -173,15 +175,16 @@ const WalkBack = {
     if (!World.inWorld() || World.isDead()) return this.cancel('Walk back interrupted.', false);
     if (Manual.lastAt !== a.manualAt) return this.cancel('Manual control: walk back cancelled.', false);
     if (a.source === 'planning') {
-      if (now() - a.plan.at <= WALK_PLAN_MS) return;
+      if (now() - a.plan.at <= (a.plan.limit || WALK_PLAN_MS)) return;
       if (!this.useLegs()) return;
     }
     if (!a.route?.length) return;
     const pose = World.pose(), dest = a.route[a.index], distance = dist2D(pose, dest);
     if (!Number.isFinite(distance)) return this.cancel('Cannot walk to the saved hunting spot.');
     // Only the last point may use the caller's wider arrival radius; waypoints on the way stay tight.
-    if (distance <= (a.index >= a.route.length - 1 ? a.stop : 12)) {
-      a.index++; a.leg = null; a.legTries = 0; a.progressAt = now(); a.lastPose = { ...pose }; a.travel = null;
+    const last = a.index >= a.route.length - 1;
+    if (distance <= (last ? a.stop : a.source === 'navdata' ? WALK_NAV_REACH : 12)) {
+      a.index++; a.skips = 0; a.leg = null; a.legTries = 0; a.progressAt = now(); a.lastPose = { ...pose }; a.travel = null;
       if (a.index < a.route.length) return;
       this.active = null;
       if (a.onDone) return a.onDone();
@@ -227,8 +230,16 @@ const WalkBack = {
     }
     // A leg end only gives the direction: its neighbourhood will do, which spares
     // searching for a point that may lie on a slope or a rock.
-    const move = a.leg ? Navigation.next(a, a.leg.target, a.recorded, WALK_LEG_REACH, true) : Navigation.next(a, dest, a.recorded);
+    // The last point may stand on something solid (an NPC): its stop radius is reach enough. A navdata waypoint only
+    // gives the way: its neighbourhood will do.
+    const waypoint = !last && a.source === 'navdata', reach = waypoint ? WALK_NAV_REACH : last && a.stop > 12 ? a.stop : 0;
+    const move = a.leg ? Navigation.next(a, a.leg.target, a.recorded, WALK_LEG_REACH, true) : Navigation.next(a, dest, a.recorded, reach, reach > 0);
     if (move.error && !move.waiting) {
+      if (waypoint && (a.skips || 0) < WALK_NAV_SKIPS) {
+        a.skips = (a.skips || 0) + 1; a.index++; a.travel = null; a.progressAt = now();
+        Log.info('Walk back: a route point is out of reach; going on to the next one.');
+        return;
+      }
       if (a.source === 'navdata') {
         if (this.replan(pose)) return;
         if (this.useLegs()) return;
