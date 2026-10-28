@@ -5475,6 +5475,7 @@ updateTests().catch(error => { console.error(error); process.exitCode = 1; });
 function reloadFixture() {
   const { f, sent, lose, back } = reconnectFixture(); let reloads = 0, failure = '';
   f.Reconnect.doReload = () => { reloads++; };
+  f.Reconnect.jitter = () => 0;
   f.Reconnect.loadFailure = () => failure;
   return { f, sent, lose, back, reloads: () => reloads, fail: text => { failure = text; } };
 }
@@ -5491,7 +5492,7 @@ test('a game that fails to load is reloaded after a wait, remembering the charac
 
 test('after the reload the character is entered again and hunting resumes', () => {
   const r = reloadFixture(), f = r.f;
-  f.storage.set('sro-lean-reload', JSON.stringify({ pending: { character: 'Tester', hunting: true, at: Date.now() }, times: [Date.now()] }));
+  f.storage.set('sro-lean-reload', JSON.stringify({ pending: { character: 'Tester', hunting: true, at: Date.now() }, reloads: { count: 1, first: Date.now(), last: Date.now() } }));
   f.stopAll(); f.World.gp = null; f.World.phase = 'listing-servers'; r.sent.length = 0;
   f.Controller.tick(); assert.equal(f.Reconnect.active(), true); assert.match(f.Reconnect.message, /restore your login/);
   f.advance(4000); f.Controller.tick(); assert.equal(r.sent.length, 0, 'waits while the game restores the login');
@@ -5499,13 +5500,14 @@ test('after the reload the character is entered again and hunting resumes', () =
   assert.deepEqual(r.sent[0], { kind: 'enter-world', character: 'Tester' }, 'no resume attempt: the page is fresh');
   r.back(); f.advance(100); f.Controller.tick(); f.advance(3500); f.Controller.tick();
   assert.equal(f.Hunt.running, true); assert.equal(f.Reconnect.active(), false); assert.equal(stored(f).pending, null);
+  assert.equal(stored(f).reloads, null, 'back in the game: the next reload waits the shortest time again');
 });
 
 test('a reload that is not wanted or not allowed never happens', () => {
-  const r = reloadFixture(), f = r.f; r.fail('Renderer failed: x');
-  f.storage.set('sro-lean-reload', JSON.stringify({ times: [Date.now() - 1000, Date.now() - 2000, Date.now() - 3000] }));
-  f.Controller.tick(); f.advance(16000); f.Controller.tick(); f.advance(60000); f.Controller.tick();
-  assert.equal(r.reloads(), 0); assert.match(f.Reconnect.message, /not reloading again/);
+  const r = reloadFixture(), f = r.f; r.fail('Renderer failed: x'); f.World.phase = 'failed'; f.World.gp = null;
+  f.storage.set('sro-lean-reload', JSON.stringify({ reloads: { count: 9, first: Date.now() - 13 * 3600000, last: Date.now() - 60000 } }));
+  f.Controller.tick(); f.advance(31 * 60000); f.Controller.tick(); f.advance(60000); f.Controller.tick();
+  assert.equal(r.reloads(), 0, 'after 12 hours of reloads it stops'); assert.match(f.Reconnect.message, /over 12 hours without getting back in; not reloading again/);
   const g = reloadFixture(); g.f.storage.set('sro-lean-reload', JSON.stringify({ pending: { character: 'Tester', hunting: true, at: Date.now() - 3600000 } }));
   g.f.stopAll(); g.f.World.gp = null; g.f.World.phase = 'signed-out'; g.f.Controller.tick(); assert.equal(g.f.Reconnect.active(), false, 'a stale reload is not resumed');
   const h = reloadFixture(); h.f.storage.set('sro-lean-reload', JSON.stringify({ pending: { character: 'Tester', hunting: true, at: Date.now() } }));
@@ -5523,23 +5525,39 @@ test('an expired world session skips the futile resume, enters afresh, then relo
   f.advance(25000); f.Controller.tick(); assert.equal(r.reloads(), 1);
   assert.equal(stored(f).pending.character, 'Tester');
   const g = reloadFixture(); g.lose(); g.f.World.session = { phase: 'disconnected', disconnectMessage: 'Your session ended while the connection was gone.' };
-  g.f.storage.set('sro-lean-reload', JSON.stringify({ times: [Date.now(), Date.now(), Date.now()] }));
-  g.f.advance(3000); g.f.Controller.tick(); g.f.advance(40000); g.f.Controller.tick(); assert.equal(g.reloads(), 0); assert.equal(g.f.Reconnect.gaveUp, true);
+  g.f.storage.set('sro-lean-reload', JSON.stringify({ reloads: { count: 3, first: Date.now(), last: Date.now() } }));
+  g.f.advance(3000); g.f.Controller.tick(); g.f.advance(40000); g.f.Controller.tick();
+  assert.equal(g.reloads(), 0, 'the fourth reload in a row waits 8 times as long: 4 minutes'); assert.equal(g.f.Reconnect.gaveUp, false);
+  g.f.advance(205000); g.f.Controller.tick(); assert.equal(g.reloads(), 1); assert.equal(stored(g.f).reloads.count, 4);
 });
 
-test('a plain "Disconnected from the server." that nothing recovers ends in a page reload, and the reload limit is only a pause', () => {
+test('a plain "Disconnected from the server." that nothing recovers ends in a page reload, and reloads in a row wait longer, never stopping early', () => {
   const r = reloadFixture(), f = r.f; r.sent.length = 0;
   r.lose(); f.World.session = { phase: 'disconnected', disconnectMessage: '' };
   for (let i = 0; i < 40 && r.reloads() === 0; i++) { f.advance(10000); f.Controller.tick(); }
   assert.equal(r.reloads(), 1, 'stuck reconnecting: the page is reloaded to restore the login');
   assert.ok(r.sent.filter(c => c.kind === 'reconnect').length === 1, 'one resume attempt only');
   const g = reloadFixture(); g.lose(); g.f.World.session = { phase: 'disconnected', disconnectMessage: '' };
-  g.f.storage.set('sro-lean-reload', JSON.stringify({ times: [Date.now(), Date.now(), Date.now()] }));
-  for (let i = 0; i < 40; i++) { g.f.advance(10000); g.f.Controller.tick(); }
-  assert.equal(g.reloads(), 0); assert.equal(g.f.Reconnect.gaveUp, true);
-  assert.ok(g.f.Reconnect.retryAt > Date.now() + 25 * 60000, 'paused until the oldest reload is 30 minutes old'); g.f.Reconnect.retryAt = Date.now() - 1; g.f.storage.set('sro-lean-reload', JSON.stringify({ times: [Date.now() - 31 * 60000, Date.now() - 32 * 60000, Date.now() - 33 * 60000] }));
+  g.f.storage.set('sro-lean-reload', JSON.stringify({ reloads: { count: 6, first: Date.now() - 3 * 3600000, last: Date.now() } }));
+  for (let i = 0; i < 100; i++) { g.f.advance(10000); g.f.Controller.tick(); }
+  assert.equal(g.reloads(), 0, 'the seventh reload in a row waits the longest: 30 minutes'); assert.equal(g.f.Reconnect.gaveUp, false);
   for (let i = 0; i < 200 && g.reloads() === 0; i++) { g.f.advance(10000); g.f.Controller.tick(); }
-  assert.equal(g.reloads(), 1, 'once the limit window has passed the bot tries again');
+  assert.equal(g.reloads(), 1, 'a server down for hours is still retried, every 30 minutes');
+});
+test('reloads in a row wait twice as long each time, up to 30 minutes plus a small random delay, and start over once back in the game', () => {
+  const r = reloadFixture(), f = r.f, streak = n => f.storage.set('sro-lean-reload', JSON.stringify(n ? { reloads: { count: n, first: Date.now(), last: Date.now() } } : {}));
+  const waits = [];
+  for (let n = 0; n < 9; n++) { streak(n); waits.push(f.Reconnect.reloadWait(15000)); }
+  assert.deepEqual(waits, [15000, 30000, 60000, 120000, 240000, 480000, 960000, 1800000, 1800000]);
+  f.Reconnect.jitter = () => 0.2; assert.equal(f.Reconnect.reloadWait(15000), 2160000, 'the random delay is at most a fifth more'); f.Reconnect.jitter = () => 0;
+  streak(0); r.fail('Renderer failed: x'); f.World.phase = 'failed'; f.World.gp = null;
+  f.Controller.tick(); f.advance(16000); f.Controller.tick(); assert.equal(r.reloads(), 1); assert.equal(stored(f).reloads.count, 1);
+  f.Reconnect.failedAt = 0; f.Controller.tick(); f.advance(20000); f.Controller.tick();
+  assert.equal(r.reloads(), 1, 'the second reload in a row waits 30 s'); assert.match(f.Reconnect.message, /reloading the page in 10 s/);
+  f.advance(11000); f.Controller.tick(); assert.equal(r.reloads(), 2); assert.equal(stored(f).reloads.count, 2);
+  r.fail(''); f.World.phase = 'world'; f.World.gp = { ...fixture().World.gp }; f.advance(6000); f.Controller.tick();
+  assert.equal(stored(f).reloads, null, 'back in the game: the count starts over');
+  assert.equal(f.Reconnect.waitText(45000), '45 s'); assert.equal(f.Reconnect.waitText(240000), '4 min');
 });
 test('buff swaps with a full bag still run when no shield has to come off, and say why when one does', () => {
   // Full bag, Bard set: a one-handed weapon swap without any shield change needs no free slot.

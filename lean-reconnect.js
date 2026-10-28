@@ -5,13 +5,14 @@
 // cancels everything, and so does logging in or entering a character by hand.
 // When the game itself fails to load ("Unable to finish loading") the page is reloaded after a short wait. The character
 // and whether hunting was running are kept in localStorage across the reload; the game restores the login from its own
-// session cookie, then the same reconnect steps below enter the world and resume hunting. At most 3 reloads per 30 minutes.
+// session cookie, then the same reconnect steps below enter the world and resume hunting. Each reload in a row waits twice
+// as long as the one before (up to 30 minutes, plus a small random delay); after 12 hours of reloads it gives up.
 const Reconnect = {
   intent: null, attempts: 0, nextAt: 0, waitUntil: 0, backAt: 0, message: '',
   DELAYS: [4000, 10000, 20000, 30000], GIVE_UP_MS: 12 * 3600 * 1000,
-  STORE_KEY: 'sro-lean-reload', LOAD_WAIT_MS: 15000, MAX_RELOADS: 3, RELOAD_WINDOW_MS: 30 * 60000, PENDING_MS: 10 * 60000, LOGIN_GRACE_MS: 60000,
-  restored: false, failedAt: 0, expiredAt: 0, EXPIRED_WAIT_MS: 30000, snapAt: 0, gaveUp: false, retryAt: 0,
-  // What survives a page reload: the last in-world snapshot, the reload times and the one reload waiting to be resumed.
+  STORE_KEY: 'sro-lean-reload', LOAD_WAIT_MS: 15000, RELOAD_MAX_MS: 30 * 60000, SNAP_MS: 30 * 60000, PENDING_MS: 10 * 60000, LOGIN_GRACE_MS: 60000,
+  restored: false, failedAt: 0, failedWait: 0, expiredAt: 0, expiredWait: 0, EXPIRED_WAIT_MS: 30000, snapAt: 0, gaveUp: false,
+  // What survives a page reload: the last in-world snapshot, the reloads in a row and the one reload waiting to be resumed.
   load() { try { return JSON.parse(window.localStorage.getItem(this.STORE_KEY)) || {}; } catch { return {}; } },
   save(data) { try { window.localStorage.setItem(this.STORE_KEY, JSON.stringify(data)); } catch {} },
   // The game's own loading screen says when it gave up; its label is only changed to this text on a failure.
@@ -26,8 +27,19 @@ const Reconnect = {
     if (!World.inWorld() || !World.charName || now() - this.snapAt < 5000) return;
     this.snapAt = now();
     const data = this.load();
-    this.save({ ...data, snap: { character: World.charName, hunting: !!(Hunt.running || Town.trip || WalkBack.active || this.intent?.hunting), at: Date.now() } });
+    this.gaveUp = false;
+    this.save({ ...data, reloads: null, snap: { character: World.charName, hunting: !!(Hunt.running || Town.trip || WalkBack.active || this.intent?.hunting), at: Date.now() } });
   },
+  reloadStreak() {
+    const r = this.load().reloads;
+    return r && Number.isInteger(r.count) && r.count > 0 && Number.isFinite(r.first) && Number.isFinite(r.last) ? r : null;
+  },
+  jitter() { return Math.random() * 0.2; },
+  reloadWait(base) {
+    const n = this.reloadStreak()?.count || 0;
+    return Math.round(Math.min(base * 2 ** n, this.RELOAD_MAX_MS) * (1 + this.jitter()));
+  },
+  waitText(ms) { return ms < 90000 ? Math.max(1, Math.ceil(ms / 1000)) + ' s' : Math.round(ms / 60000) + ' min'; },
   // Right after a reload: pick the character up again exactly as after a lost connection.
   restore() {
     this.restored = true;
@@ -40,33 +52,33 @@ const Reconnect = {
     this.message = 'The page was reloaded; restoring ' + p.character + '.';
     Log.warn('The game failed to load earlier; page reloaded, restoring ' + p.character + '.');
   },
-  // Save what to resume, then reload. Shared by a failed load and an expired session; limited to 3 per 30 minutes.
+  // Save what to resume, then reload. Shared by a failed load and an expired session; the wait before it grows with
+  // every reload in a row (reloadWait), and reloading stops after 12 hours without getting back into the game.
   reloadPage() {
-    const data = this.load(), times = (data.times || []).filter(t => Date.now() - t < this.RELOAD_WINDOW_MS);
-    if (times.length >= this.MAX_RELOADS) {
+    const data = this.load(), streak = this.reloadStreak();
+    if (streak && Date.now() - streak.first > this.GIVE_UP_MS) {
       if (!this.gaveUp) {
-        this.gaveUp = true; this.retryAt = Math.min(...times) + this.RELOAD_WINDOW_MS + 1000; this.message = 'Reloaded the page ' + this.MAX_RELOADS + ' times in 30 minutes; not reloading again for now; trying again when the oldest reload is 30 minutes old.';
+        this.gaveUp = true; this.message = 'Reloaded the page ' + streak.count + ' times over 12 hours without getting back in; not reloading again. Reload the page yourself when the server is back.';
         Log.warn(this.message); UI.toast(this.message, 'warn', 8000);
       }
       return false;
     }
-    const known = this.intent ? { character: this.intent.character, hunting: this.intent.hunting } : data.snap && Date.now() - data.snap.at < this.RELOAD_WINDOW_MS ? data.snap : null;
-    this.save({ snap: data.snap, times: [...times, Date.now()], pending: known ? { character: known.character, hunting: !!known.hunting, at: Date.now() } : null });
+    const known = this.intent ? { character: this.intent.character, hunting: this.intent.hunting } : data.snap && Date.now() - data.snap.at < this.SNAP_MS ? data.snap : null;
+    this.save({ snap: data.snap, reloads: { count: (streak?.count || 0) + 1, first: streak?.first || Date.now(), last: Date.now() },
+      pending: known ? { character: known.character, hunting: !!known.hunting, at: Date.now() } : null });
     this.doReload();
     return true;
-  },
-  // The reload limit is a pause, not the end: once the oldest reload is 30 minutes old another one is allowed (a server
-  // that is down for hours must not leave the bot stuck for the night).
-  capped() {
-    if (this.gaveUp && Date.now() >= this.retryAt) { this.gaveUp = false; this.failedAt = this.failedAt ? now() : 0; this.expiredAt = this.expiredAt ? now() : 0; }
-    return this.gaveUp;
   },
   watchLoad() {
     const text = this.loadFailure();
     if (!text) { this.failedAt = 0; return; }
-    if (!this.failedAt) { this.failedAt = now(); this.gaveUp = false; Log.warn('The game failed to load (' + text + '); reloading the page shortly.'); }
-    if (this.capped()) return;
-    if (now() - this.failedAt < this.LOAD_WAIT_MS) { this.message = 'The game failed to load; reloading the page shortly.'; return; }
+    if (!this.failedAt) {
+      this.failedAt = now(); this.failedWait = this.reloadWait(this.LOAD_WAIT_MS);
+      Log.warn('The game failed to load (' + text + '); reloading the page in ' + this.waitText(this.failedWait) + '.');
+    }
+    if (this.gaveUp) return;
+    const left = this.failedWait - (now() - this.failedAt);
+    if (left > 0) { this.message = 'The game failed to load; reloading the page in ' + this.waitText(left) + '.'; return; }
     this.reloadPage();
   },
 
@@ -111,8 +123,10 @@ const Reconnect = {
     // failed the login behind them is stale as well, so it gets the same treatment: enter afresh, then reload the page.
     const expired = phase === 'disconnected' && (/session ended while the connection was gone|could not resume/i.test(String(World.session?.disconnectMessage || '') + ' ' + error) || this.attempts >= 4);
     if (expired) {
-      if (!this.expiredAt) { this.expiredAt = now(); Log.warn('The game session is gone (' + (this.attempts >= 4 ? 'reconnect attempts failed' : 'session ended') + '); entering the character again, then reloading the page.'); }
-      else if (now() - this.expiredAt > this.EXPIRED_WAIT_MS && !this.capped()) { this.message = 'Still not back; reloading the page.'; if (this.reloadPage()) return; }
+      if (!this.expiredAt) {
+        this.expiredAt = now(); this.expiredWait = this.reloadWait(this.EXPIRED_WAIT_MS);
+        Log.warn('The game session is gone (' + (this.attempts >= 4 ? 'reconnect attempts failed' : 'session ended') + '); entering the character again, then reloading the page in ' + this.waitText(this.expiredWait) + '.');
+      } else if (now() - this.expiredAt > this.expiredWait && !this.gaveUp) { this.message = 'Still not back; reloading the page.'; if (this.reloadPage()) return; }
     }
     if (now() < this.nextAt || now() < this.waitUntil) return;
     const n = this.attempts++;

@@ -153,9 +153,9 @@ Once the character is back, hunting that was running resumes: at the hunting spo
 
 ### When the game fails to load
 
-If the game's loading screen shows **Unable to finish loading** (for example "Renderer failed: Invalid particle graph time"), the bot waits 15 seconds and reloads the page. It remembers the character and whether hunting was running; after the reload the game restores your login from its own session cookie, the bot enters the character again and hunting resumes as described above. It reloads at most 3 times in 30 minutes, then stops and says so. If the login cannot be restored, the status line says so and the bot waits for you. Logging out or entering a character yourself cancels it.
+If the game's loading screen shows **Unable to finish loading** (for example "Renderer failed: Invalid particle graph time"), the bot waits 15 seconds and reloads the page. It remembers the character and whether hunting was running; after the reload the game restores your login from its own session cookie, the bot enters the character again and hunting resumes as described above. If it still cannot get back in, every further reload in a row waits twice as long as the one before: 15 seconds, 30 seconds, 1 minute, 2, 4, 8, 16, then every 30 minutes, each with a small random extra delay so many bots do not reload at the same moment after a server restart. Once the character is back in the game the count starts over. After 12 hours of reloads without getting back in it stops and says so. If the login cannot be restored, the status line says so and the bot waits for you. Logging out or entering a character yourself cancels it.
 
-If the game shows **Your session ended while the connection was gone. Please log in again.**, the server dropped the session (it only holds a lost connection for about 30 seconds), so resuming is pointless. The bot enters the character afresh instead; if that has not worked after 30 seconds it reloads the page the same way, with the same limit of 3 reloads per 30 minutes. It never presses that window's Confirm button, which would log you out.
+If the game shows **Your session ended while the connection was gone. Please log in again.**, the server dropped the session (it only holds a lost connection for about 30 seconds), so resuming is pointless. The bot enters the character afresh instead; if that has not worked after 30 seconds it reloads the page the same way, and further reloads in a row wait twice as long each time (1 minute, 2, 4 and so on, up to 30 minutes). It never presses that window's Confirm button, which would log you out.
 
 If the character was killed while the connection was gone, the bot starts hunting again once it is back, so the usual death handling revives it and walks it back to the hunting spot (subject to your **On death** setting).
 
@@ -163,7 +163,7 @@ An application to the main's party that has not been answered after 30 seconds i
 
 If the character is back in a known town, far from the hunting spot, and the town cycle's revive option is on, the bot does the town services and reverses with the scroll (the same trip as after a death) instead of walking.
 
-If the plain **Disconnected from the server.** box stays up and the resume and three fresh entries have not brought the character back, the bot reloads the page the same way. The limit of 3 reloads in 30 minutes is a pause, not the end: once the oldest reload is 30 minutes old the bot tries again, for up to 12 hours.
+If the plain **Disconnected from the server.** box stays up and the resume and three fresh entries have not brought the character back, the bot reloads the page the same way, with the same growing wait between reloads in a row. A server that is down for hours is still retried every 30 minutes, for up to 12 hours.
 
 ## Returning after death
 
