@@ -147,6 +147,7 @@ const Diagnostics = {
       if (/^(walk|open)-/.test(Town.trip.phase) && Town.message) return Town.message;
       return 'Town services: ' + (phases[Town.trip.phase] || 'travelling between or opening services') + '.';
     }
+    if (Travel.active && !WalkBack.active) return Travel.status();
     if (WalkBack.active) return WalkBack.status();
     if (Restock.trip || Resurrect.trip) return 'Travelling; waiting to reach the destination.';
     if (!Hunt.running) return AutoStart.pending() ? AutoStart.message || 'Auto-start: waiting.' : 'Bot stopped.';
