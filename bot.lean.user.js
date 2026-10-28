@@ -443,6 +443,7 @@ const Hook = {
   nativePost: null,
   NativeWorker: null,
   simUrl: '',
+  assetUrl: '',
   observers: [],
   guards: [], // fn(command) -> true swallows one of the game's own commands
   probe: null,
@@ -502,6 +503,7 @@ function installWorkerHook() {
       super(url, options);
       try {
         const name = options && options.name;
+        if (name === 'sro-assets') Hook.assetUrl = String(url);
         if (name === 'sro-simulation') {
           Hook.simUrl = String(url);
           attachSimulation(this, false);
@@ -5316,7 +5318,11 @@ const Route = {
   areas: typeof NAVDATA_AREAS !== 'undefined' ? NAVDATA_AREAS : [],
   base: typeof NAVDATA_BASE !== 'undefined' ? NAVDATA_BASE : '',
   cache: new Map(), loading: new Map(), dbp: null, loader: null, message: '',
-  setAreas(list) { this.areas = Array.isArray(list) ? list : []; this.cache.clear(); this.loading.clear(); this.message = ''; },
+  // Edges the game's collision does not walk (lean-route-check.js), per area, for this session: 'from>to' both ways.
+  banned: new Map(),
+  setAreas(list) { this.areas = Array.isArray(list) ? list : []; this.cache.clear(); this.loading.clear(); this.banned.clear(); this.message = ''; },
+  bans(name) { if (!this.banned.has(name)) this.banned.set(name, new Set()); return this.banned.get(name); },
+  ban(name, a, b) { this.bans(name).add(a + '>' + b).add(b + '>' + a); },
   setLoader(fn) { this.loader = typeof fn === 'function' ? fn : null; },
   absolute(p) {
     return p ? { x: (p.regionId & 255) * SECTOR + p.x, z: (p.regionId >>> 8) * SECTOR + p.z } : null;
@@ -5482,7 +5488,7 @@ const Route = {
     }
     return best < 0 ? null : { node: best, distance: Math.sqrt(score) };
   },
-  astar(graph, start, goal) {
+  astar(graph, start, goal, banned = null) {
     const count = graph.count, score = new Float64Array(count).fill(Infinity), came = new Int32Array(count).fill(-1);
     const closed = new Uint8Array(count), heap = [];
     const h = i => Math.hypot(graph.x[i] - graph.x[goal], graph.z[i] - graph.z[goal]);
@@ -5529,7 +5535,7 @@ const Route = {
       }
       for (let k = graph.offsets[node]; k < graph.offsets[node + 1]; k++) {
         const next = graph.neighbours[k];
-        if (closed[next]) continue;
+        if (closed[next] || banned?.has(node + '>' + next)) continue;
         const step = Math.hypot(graph.x[next] - graph.x[node], graph.z[next] - graph.z[node]) +
           Math.min(Math.abs(graph.y[next] - graph.y[node]), 200) * .25;
         const value = score[node] + step;
@@ -5564,6 +5570,21 @@ const Route = {
     for (let i = 1; i < points.length; i++) length.value += dist2D(points[i - 1], points[i]);
     return { points, length: length.value };
   },
+  // The corridor, checked against the game's collision first where the asset worker is known (lean-route-check.js).
+  // An edge it cannot walk is banned, so the plan below already goes around it.
+  async checked(from, to) {
+    if (!await this.ensure(from, to)) return null;
+    const meta = this.commonArea(from, to), area = meta && this.cache.get(meta.name);
+    let checked = false;
+    if (area && RouteCheck.available()) {
+      const graph = this.graph(area), here = this.absolute(from), there = this.absolute(to);
+      const start = this.nearest(graph, here.x, here.z), end = this.nearest(graph, there.x, there.z);
+      if (start && end && start.node !== end.node) checked = await RouteCheck.verify(meta.name, graph, start.node, end.node) !== null;
+    }
+    const plan = this.plan(from, to);
+    if (!plan && checked) this.message = 'No corridor in the route data walks on the game map.';
+    return plan;
+  },
   // null means "use the leg fallback"; it is not an error.
   plan(from, to) {
     this.message = '';
@@ -5577,12 +5598,194 @@ const Route = {
     const start = this.nearest(graph, here.x, here.z), end = this.nearest(graph, there.x, there.z);
     if (!start || !end) { this.message = 'No route node near the character or the hunting spot.'; return null; }
     if (start.node === end.node) return null;
-    const path = this.astar(graph, start.node, end.node);
+    const path = this.astar(graph, start.node, end.node, this.banned.get(a.name));
     if (!path) { this.message = 'No walkable path in the route data.'; return null; }
     const thinned = this.thin(graph, path, from.y);
     if (!thinned.points.length) return null;
     return { source: 'navdata', area: a.name, points: thinned.points, length: thinned.length,
       nodes: path.length, snap: Math.max(start.distance, end.distance) };
+  },
+};
+
+
+// Checks a navdata corridor (lean-route.js) against the game's own collision before it is walked.
+// The converted navdata is another map's: here a slope it climbs can be a cliff (Hotan to the Karakoram
+// aircraft dock climbs out of the crater where the rim is a wall). The game's asset worker builds the collision
+// of any region on request, as it does for the region you stand in, and the game's clipper (lean-clipper.js)
+// walks each corridor edge: a straight line first, else a small lattice search. An edge it cannot walk is left
+// out of the area's graph (Route.ban) and the corridor is planned again, until every edge walks or none is left.
+// The asset worker's address is seen when the game starts it (the worker hook) or, when the userscript ran too late
+// for that, read from the page's own bootstrap module, which names it. Without it or the clipper the corridor is
+// walked unchecked, as before, and the log says so.
+const CHECK_CELL = 40;          // lattice cell, and the longest step checked in one clip
+const CHECK_REACH = 60;         // an edge walks when its far end is reached within this
+const CHECK_NODES = 1500;       // lattice search budget for an edge the straight line does not walk
+const CHECK_AROUND = 400;       // the search stays this close to the edge: a longer way round is the graph's to find
+const CHECK_SLICE_MS = 6;       // search time per slice; the game draws between slices
+const CHECK_ROUNDS = 60;        // corridors tried before giving up
+const CHECK_MS = 150000;        // whole check
+const CHECK_REGIONS = 6;        // regions kept in memory
+const CHECK_LOAD_MS = 30000;
+
+const RouteCheck = {
+  worker: null, queue: Promise.resolve(), regions: new Map(), message: '', locating: null,
+  bootstrap() { return W.document?.querySelector?.('script[type="module"][src*="/assets/"]')?.src || ''; },
+  available() { return typeof NativeClipper !== 'undefined' && (!!Hook.assetUrl || !!this.bootstrap()); },
+  locate() {
+    if (Hook.assetUrl) return Promise.resolve(Hook.assetUrl);
+    this.locating ||= (async () => {
+      const src = this.bootstrap();
+      if (!src) return '';
+      const text = await (await W.fetch(src, { credentials: 'same-origin' })).text();
+      const found = text.match(/new\s+Worker\(\s*new\s+URL\(\s*["']([^"']+)["'][^)]*\)\s*,\s*\{[^}]*name\s*:\s*["']sro-assets["']/);
+      if (found) Hook.assetUrl = new URL(found[1], src).href;
+      return Hook.assetUrl;
+    })().catch(() => '').finally(() => { this.locating = null; });
+    return this.locating;
+  },
+  // One region's collision, as the game's asset worker builds it (its 3x3 window), with a clipper installed on it.
+  region(regionId) {
+    if (this.regions.has(regionId)) {
+      const hit = this.regions.get(regionId);
+      this.regions.delete(regionId); this.regions.set(regionId, hit);
+      return hit;
+    }
+    const job = this.load(regionId).then(product => {
+      if (!product?.complete || product.regionId !== regionId) return null;
+      const clipper = NativeClipper.createNavigation();
+      clipper.install(product.regionId, product);
+      return { regionId, clipper };
+    }).catch(() => null);
+    this.regions.set(regionId, job);
+    while (this.regions.size > CHECK_REGIONS) this.regions.delete(this.regions.keys().next().value);
+    return job;
+  },
+  // One request at a time: the worker's replies carry no request this code could match.
+  load(regionId) {
+    const job = this.queue.then(() => new Promise((resolve, reject) => {
+      const worker = this.worker ||= new (Hook.NativeWorker || W.Worker)(Hook.assetUrl, { type: 'module', name: 'nix-collision' });
+      const timer = setTimeout(() => done(null, Error('Region collision timed out.')), CHECK_LOAD_MS);
+      const done = (product, error) => {
+        clearTimeout(timer); worker.onmessage = null; worker.onerror = null;
+        if (error) { worker.terminate(); if (this.worker === worker) this.worker = null; reject(error); } else resolve(product);
+      };
+      worker.onmessage = e => {
+        if (e.data?.kind === 'navigation') done(e.data.product);
+        else if (e.data?.kind === 'error') done(null, Error(String(e.data.error)));
+      };
+      worker.onerror = () => done(null, Error('Region collision worker failed.'));
+      const path = '/assets/world/outdoor/regions/region-' + regionId.toString(16).padStart(4, '0') + '.json#' + regionId;
+      worker.postMessage({ kind: 'request', id: 1, url: new URL(path, W.location.href).href, decode: 'navigation', limit: 128 << 20 });
+    }));
+    this.queue = job.catch(() => {});
+    return job;
+  },
+  release() {
+    this.regions.clear();
+    this.worker?.terminate(); this.worker = null;
+  },
+  // Every edge of the corridor from start to goal walks, or false when no corridor does; null when the check could
+  // not run. Bans stay for the area.
+  async verify(area, graph, start, goal) {
+    if (!await this.locate()) {
+      Log.warn('Route check (beta): the game\'s asset loader was not found, so the route data is walked unchecked.');
+      return null;
+    }
+    const walks = new Set(), deadline = now() + CHECK_MS, before = Route.bans(area).size / 2;
+    let unknown = 0, result = false;
+    try {
+      for (let round = 0; round < CHECK_ROUNDS && now() < deadline; round++) {
+        const path = Route.astar(graph, start, goal, Route.bans(area));
+        if (!path) break;
+        let blocked = false;
+        for (let i = 0; i + 1 < path.length && now() < deadline; i++) {
+          const u = path[i], v = path[i + 1];
+          if (walks.has(u + '>' + v)) continue;
+          this.message = 'checking the route against the game map (' + (i + 1) + '/' + (path.length - 1) + ')';
+          const walk = await this.edge(graph, u, v);
+          if (walk === false) { Route.ban(area, u, v); blocked = true; break; }
+          if (walk === null) unknown++;
+          walks.add(u + '>' + v);
+        }
+        if (!blocked) { result = now() < deadline; break; }
+      }
+      const left = Route.bans(area).size / 2 - before;
+      Log.info('Route check (beta): ' + (result ? 'the corridor walks on the game map' : 'no corridor walks on the game map') +
+        (left ? '; ' + left + ' step' + (left === 1 ? '' : 's') + ' left out' : '') + (unknown ? '; ' + unknown + ' without collision data' : '') + '.');
+      return result;
+    } finally { this.message = ''; this.release(); }
+  },
+  // true walks, false is blocked, null is unknown (no collision for that region): an unknown edge is walked as before.
+  async edge(graph, u, v) {
+    const from = Route.pose(graph.x[u], graph.z[u], graph.y[u]), to = Route.pose(graph.x[v], graph.z[v], graph.y[v]);
+    if (!from || !to) return null;
+    const region = await this.region(from.regionId);
+    if (!region) return null;
+    const c = region.clipper, origin = from.regionId;
+    const rel = p => [((p.regionId & 255) - (origin & 255)) * SECTOR + p.x, ((p.regionId >>> 8 & 127) - (origin >>> 8 & 127)) * SECTOR + p.z];
+    const at = (x, z, y) => {
+      const rx = Math.floor(x / SECTOR), rz = Math.floor(z / SECTOR);
+      return { regionId: ((origin >>> 8 & 127) + rz) << 8 | (origin & 255) + rx, x: x - rx * SECTOR, y, z: z - rz * SECTOR };
+    };
+    const step = (pose, x, z) => {
+      const got = c.clip({ ...pose, angle: 0 }, { ...at(x, z, pose.y), angle: 0 }, { slide: false });
+      if (!got) return null;
+      const [gx, gz] = rel(got);
+      return Math.hypot(gx - x, gz - z) <= 2 ? got : null;
+    };
+    const start = c.surface(from);
+    if (!c.available(start)) return null;
+    const [sx, sz] = rel(start), [tx, tz] = rel(to);
+    // The straight line, in steps of at most one cell.
+    const n = Math.max(1, Math.ceil(Math.hypot(tx - sx, tz - sz) / CHECK_CELL));
+    let pose = start;
+    for (let i = 1; i <= n && pose; i++) pose = step(pose, sx + (tx - sx) * i / n, sz + (tz - sz) * i / n);
+    if (pose) return true;
+    // A lattice search around whatever stands in the way, in slices.
+    const search = this.search(step, rel, start, tx, tz);
+    for (;;) {
+      const started = performance.now();
+      let result;
+      while ((result = search.next()).done === false && performance.now() - started < CHECK_SLICE_MS);
+      if (result.done) return result.value;
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  },
+  *search(step, rel, start, gx, gz) {
+    const key = (i, j, y) => i + ',' + j + ',' + Math.round(y / 12), h = (i, j) => Math.hypot(i * CHECK_CELL - gx, j * CHECK_CELL - gz);
+    const [sx, sz] = rel(start), mx = (sx + gx) / 2, mz = (sz + gz) / 2;
+    const near = (a, b) => Math.hypot(a * CHECK_CELL - mx, b * CHECK_CELL - mz) <= CHECK_AROUND;
+    let i0 = Math.round(sx / CHECK_CELL), j0 = Math.round(sz / CHECK_CELL), first = null;
+    // A corridor node can stand on a rock edge: join the lattice at any corner around it.
+    for (const [di, dj] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+      first = step(start, (i0 + di) * CHECK_CELL, (j0 + dj) * CHECK_CELL);
+      if (first) { i0 += di; j0 += dj; break; }
+    }
+    if (!first) return false;
+    const heap = [{ i: i0, j: j0, g: 0, f: h(i0, j0), pose: first }], closed = new Set(), scores = new Map();
+    let expanded = 0;
+    while (heap.length && expanded < CHECK_NODES) {
+      yield;
+      let m = 0;
+      for (let k = 1; k < heap.length; k++) if (heap[k].f < heap[m].f) m = k;
+      const node = heap[m];
+      heap[m] = heap[heap.length - 1]; heap.pop();
+      const k = key(node.i, node.j, node.pose.y);
+      if (closed.has(k)) continue;
+      closed.add(k); expanded++;
+      if (h(node.i, node.j) <= CHECK_REACH) return true;
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+        const a = node.i + di, b = node.j + dj;
+        if (!near(a, b)) continue;
+        const pose = step(node.pose, a * CHECK_CELL, b * CHECK_CELL);
+        if (!pose) continue;
+        const kk = key(a, b, pose.y), cost = node.g + CHECK_CELL * Math.hypot(di, dj);
+        if (closed.has(kk) || (scores.get(kk) ?? Infinity) <= cost) continue;
+        scores.set(kk, cost);
+        heap.push({ i: a, j: b, g: cost, f: cost + 1.5 * h(a, b), pose });
+      }
+    }
+    return false;
   },
 };
 
@@ -5599,6 +5802,8 @@ const WALK_MAX_LEGS = 60;        // hard safety cap on chained legs for one retu
 const WALK_MAX_MS = 30 * 60000;  // hard safety cap for the leg fallback
 const WALK_NAV_MS = 90 * 60000;  // absolute cap for a navdata route
 const WALK_PLAN_MS = 6000;       // wait this long for route data before falling back
+const WALK_NAV_REACH = 60;       // a navdata waypoint is passed within this: it may stand on a rock edge
+const WALK_NAV_SKIPS = 2;        // unreachable navdata waypoints skipped in a row before re-planning
 
 const WalkBack = {
   active: null,
@@ -5655,17 +5860,17 @@ const WalkBack = {
     const navWorth = distance > WALK_LEG && !!routeArea &&
       !(pose.regionId & DUNGEON) && !(dest.regionId & DUNGEON);
     if (!navWorth) return this.useLegs();
+    // With the game's asset worker the corridor is checked against the real collision first (lean-route-check.js).
+    const check = RouteCheck.available();
     let planned = null;
-    try { planned = Route.plan(pose, dest); } catch { planned = null; }
+    if (!check) { try { planned = Route.plan(pose, dest); } catch { planned = null; } }
     if (planned) return this.useNav(planned, pose);
     const a = this.active, token = {};
-    a.plan = { at: now(), token };
+    a.plan = { at: now(), token, limit: check ? CHECK_MS + 5000 : WALK_PLAN_MS };
     a.source = 'planning';
-    Log.info('Route: loading navdata for ' + routeArea.name + '.');
-    Route.ensure(pose, dest).then(ok => {
+    Log.info('Route: loading navdata for ' + routeArea.name + (check ? ' and checking it against the game map.' : '.'));
+    Route.checked(pose, dest).then(next => {
       if (this.active !== a || a.plan?.token !== token) return;
-      let next = null;
-      try { next = ok ? Route.plan(World.pose(), dest) : null; } catch { next = null; }
       if (next) this.useNav(next, World.pose());
       else this.useLegs();
     }, () => {
@@ -5689,7 +5894,7 @@ const WalkBack = {
     a.source = 'navdata';
     a.routeArea = route.area;
     a.routeLength = route.length + (dist2D(route.points[route.points.length - 1], a.destination) || 0);
-    a.index = 0; a.travel = null; a.leg = null; a.legTries = 0;
+    a.index = 0; a.skips = 0; a.travel = null; a.leg = null; a.legTries = 0;
     a.progressAt = now(); a.lastPose = { ...pose }; a.best = dist2D(pose, a.destination); a.bestAt = now();
     a.maxMs = Math.max(WALK_MAX_MS, Math.min(WALK_NAV_MS, a.routeLength / 20 * 1000 * 2));
     a.plan = null;
@@ -5706,7 +5911,7 @@ const WalkBack = {
       return false;
     }
     a.route = a.legRoute; a.recorded = a.legRecorded; a.source = 'legs';
-    a.index = 0; a.travel = null; a.leg = null; a.legTries = 0;
+    a.index = 0; a.skips = 0; a.travel = null; a.leg = null; a.legTries = 0;
     a.totalLegs = Math.max(1, Math.ceil(a.distance / WALK_LEG)); a.legs = 0;
     a.maxMs = WALK_MAX_MS; a.plan = null;
     a.progressAt = now(); a.lastPose = { ...pose }; a.best = dist2D(pose, a.destination); a.bestAt = now();
@@ -5723,7 +5928,7 @@ const WalkBack = {
     try { route = Route.plan(pose, a.destination); } catch { return false; }
     if (!route?.points?.length) return false;
     a.route = [...route.points.map(p => ({ ...p })), { ...a.destination }];
-    a.index = 0; a.travel = null; a.leg = null; a.legTries = 0;
+    a.index = 0; a.skips = 0; a.travel = null; a.leg = null; a.legTries = 0;
     a.progressAt = now(); a.lastPose = { ...pose }; a.best = dist2D(pose, a.destination); a.bestAt = now();
     Log.info('Route: re-planned from the current position with ' + route.points.length + ' waypoints.');
     return true;
@@ -5732,7 +5937,7 @@ const WalkBack = {
   status() {
     const a = this.active;
     if (!a) return '';
-    if (a.source === 'planning') return 'Walking to ' + a.label + ': loading route data.';
+    if (a.source === 'planning') return 'Walking to ' + a.label + ': ' + (RouteCheck.message || 'loading route data') + '.';
     const left = dist2D(World.pose(), a.destination);
     const progress = Number.isFinite(left) && a.distance ? ' · ' + Math.round(left / 10) + ' m left' : '';
     if (a.source === 'navdata') {
@@ -5762,15 +5967,16 @@ const WalkBack = {
     if (!World.inWorld() || World.isDead()) return this.cancel('Walk back interrupted.', false);
     if (Manual.lastAt !== a.manualAt) return this.cancel('Manual control: walk back cancelled.', false);
     if (a.source === 'planning') {
-      if (now() - a.plan.at <= WALK_PLAN_MS) return;
+      if (now() - a.plan.at <= (a.plan.limit || WALK_PLAN_MS)) return;
       if (!this.useLegs()) return;
     }
     if (!a.route?.length) return;
     const pose = World.pose(), dest = a.route[a.index], distance = dist2D(pose, dest);
     if (!Number.isFinite(distance)) return this.cancel('Cannot walk to the saved hunting spot.');
     // Only the last point may use the caller's wider arrival radius; waypoints on the way stay tight.
-    if (distance <= (a.index >= a.route.length - 1 ? a.stop : 12)) {
-      a.index++; a.leg = null; a.legTries = 0; a.progressAt = now(); a.lastPose = { ...pose }; a.travel = null;
+    const last = a.index >= a.route.length - 1;
+    if (distance <= (last ? a.stop : a.source === 'navdata' ? WALK_NAV_REACH : 12)) {
+      a.index++; a.skips = 0; a.leg = null; a.legTries = 0; a.progressAt = now(); a.lastPose = { ...pose }; a.travel = null;
       if (a.index < a.route.length) return;
       this.active = null;
       if (a.onDone) return a.onDone();
@@ -5816,8 +6022,16 @@ const WalkBack = {
     }
     // A leg end only gives the direction: its neighbourhood will do, which spares
     // searching for a point that may lie on a slope or a rock.
-    const move = a.leg ? Navigation.next(a, a.leg.target, a.recorded, WALK_LEG_REACH, true) : Navigation.next(a, dest, a.recorded);
+    // The last point may stand on something solid (an NPC): its stop radius is reach enough. A navdata waypoint only
+    // gives the way: its neighbourhood will do.
+    const waypoint = !last && a.source === 'navdata', reach = waypoint ? WALK_NAV_REACH : last && a.stop > 12 ? a.stop : 0;
+    const move = a.leg ? Navigation.next(a, a.leg.target, a.recorded, WALK_LEG_REACH, true) : Navigation.next(a, dest, a.recorded, reach, reach > 0);
     if (move.error && !move.waiting) {
+      if (waypoint && (a.skips || 0) < WALK_NAV_SKIPS) {
+        a.skips = (a.skips || 0) + 1; a.index++; a.travel = null; a.progressAt = now();
+        Log.info('Walk back: a route point is out of reach; going on to the next one.');
+        return;
+      }
       if (a.source === 'navdata') {
         if (this.replan(pose)) return;
         if (this.useLegs()) return;
