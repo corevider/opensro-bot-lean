@@ -33,6 +33,7 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+      actions: write
     env:
       ISSUE: ${{ github.event.issue.number || inputs.issue }}
     steps:
@@ -129,8 +130,6 @@ jobs:
         if: env.skip != 'true' && always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The Claude app's token, so the PR starts claude-merge.yml (a PR opened with GITHUB_TOKEN would not).
-          APP_TOKEN: ${{ steps.claude.outputs.github_token }}
           OUTCOME: ${{ steps.test.outputs.outcome }}
           PASSED: ${{ steps.test.outputs.passed }}
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -149,8 +148,6 @@ jobs:
             echo "I tried a fix, but it did not pass the build or tests, so I did not open a PR. A maintainer needs to look at this one. Details: $RUN" | comment
             exit 0
           fi
-          echo "Opening a PR (app token present: $([ -n "$APP_TOKEN" ] && echo yes || echo no))"
-          [ -n "$APP_TOKEN" ] || { echo "No Claude app token; cannot open a PR that the merge workflow would pick up."; exit 1; }
           branch="fix/issue-$ISSUE"
           title=$(sed -n 2p .issue/result.md | tr -d '\r')
           tail -n +3 .issue/result.md > .issue/body.md
@@ -164,7 +161,11 @@ jobs:
           stage
           git commit -q -m "$title" -m "Fixes #$ISSUE."
           echo "Committed: $(git diff --stat HEAD~1 | tail -1)"
-          git push -q --force "https://x-access-token:$APP_TOKEN@github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/heads/$branch"
+          git push -q --force "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/heads/$branch"
           echo "Pushed $branch"
-          url=$(GH_TOKEN="$APP_TOKEN" gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --title "$title" --body-file .issue/body.md)
+          url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --title "$title" --body-file .issue/body.md)
+          echo "Opened $url"
+          # The Claude app token is revoked when the agent step ends, and a PR opened with GITHUB_TOKEN starts
+          # no workflows, so start the review, fix and merge job by hand.
+          gh workflow run claude-merge.yml --repo "$GITHUB_REPOSITORY" --ref main -f pr="${url##*/}"
           echo "I opened a fix: $url. It is reviewed and tested automatically, and released if it passes." | comment
