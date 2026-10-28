@@ -1,4 +1,5 @@
 // Town service owns the whole recall -> warehouse -> shop -> smith -> reverse trip.
+// Without a reverse scroll (or with Back to the hunting spot: Walk) the trip ends after the services and WalkBack walks back.
 // Native travel-gate type 5 spends the reverse scroll: choice 2 recalls, choice 3 returns to death.
 // See OpenSRO action/reversereturn.go, 6FEF10 and 5DA1B0's choice rows.
 const TOWN_REVERSE = { recall: 2, death: 3 };
@@ -322,12 +323,15 @@ const Town = {
   restartClocks() { this.lastXpAt = this.cycleFrom = now(); },
   // Already standing in a known town (all four services in range): no return scroll is needed or wanted.
   inTown(revival = false) { return !revival && !!World.pose() && !!this.detect(World.pose()); },
+  // The way back after the services: the reverse scroll when that is the choice and one is carried, otherwise a walk.
+  walks() { return this.cfg().returnBy === 'walk'; },
+  reverses() { return !this.walks() && !!this.scroll(0x19ec); },
   validate(revival = false) {
     const c = this.cfg(), supplies = this.supplies();
-    const missing = [['arrival', 'arrival point'], ['vendor', 'potion merchant'], ['smith', 'repair merchant'], ['gate', 'world statue / teleport'], ...(c.petFull ? [['storage', 'warehouse']] : [])].filter(([key]) => !c[key]).map(([, label]) => label);
+    const missing = [['arrival', 'arrival point'], ['vendor', 'potion merchant'], ['smith', 'repair merchant'], ...(this.walks() ? [] : [['gate', 'world statue / teleport']]), ...(c.petFull ? [['storage', 'warehouse']] : [])].filter(([key]) => !c[key]).map(([, label]) => label);
     if (missing.length) return 'Save missing town services: ' + missing.join(', ') + '.';
     if (!supplies.length || supplies.some(s => !s.refObjId || !Number.isInteger(s.low) || !Number.isInteger(s.target) || s.low < 0 || s.target <= s.low || s.target > 10000)) return 'Choose potions and valid low-stock/refill quantities.';
-    if ((!revival && !this.inTown() && !this.scroll(0x09ec)) || !this.scroll(0x19ec)) return revival ? 'Carry a reverse return scroll for revival return.' : 'Carry a return scroll and a reverse return scroll before hunting.';
+    if (!revival && !this.inTown() && !this.scroll(0x09ec)) return 'Carry a return scroll before hunting.';
     if (toBigInt(World.gp.progression?.gold ?? 0) <= 0n) return 'Carry gold for potions, storage and repairs.';
     return '';
   },
@@ -360,6 +364,7 @@ const Town = {
     const inTown = this.inTown(revival);
     const origin = revival || inTown ? (reverseChoice === TOWN_REVERSE.death ? this.deathPoint || Hunt.cfg().center : this.lastScrollPoint || Hunt.cfg().center) : World.pose();
     if (!origin) return this.fail(inTown ? 'No saved hunting point to return to; set the hunting area first.' : 'No saved hunting point for revival return.');
+    if (!this.walks() && !this.scroll(0x19ec)) Log.info('No reverse return scroll: unless one is bought in town, the trip walks back to the hunting spot after the services.');
     if (revival) Hunt.running = true;
     Restock.trip = null;
     Resurrect.cancelTrip('', true); Resurrect.holdUntil = 0; Loot.suspend();
@@ -398,12 +403,26 @@ const Town = {
   order(full) {
     const sellFirst = this.trip?.sellFirst;
     const order = !sellFirst ? ['storage', 'vendor', 'smith', 'gate'] : full ? ['smith', 'storage', 'vendor', 'gate'] : ['storage', 'smith', 'vendor', 'gate'];
-    return this.cfg().storage ? order : order.filter(role => role !== 'storage');
+    return order.filter(role => (role !== 'storage' || this.cfg().storage) && (role !== 'gate' || !this.walks()));
   },
-  // The service to walk to after closing a window.
+  // The service to walk to after closing a window. After the last one: the world statue to reverse, or the walk back
+  // when no reverse scroll is carried (none was bought in town either).
   closeNext(phase) {
-    const order = this.trip?.order || this.order(false), role = phase.replace(/^close-/, '');
-    return 'walk-' + (order[order.indexOf(role) + 1] || 'gate');
+    const order = this.trip?.order || this.order(false), role = phase.replace(/^close-/, ''), next = order[order.indexOf(role) + 1] || 'gate';
+    return next === 'gate' && !this.reverses() ? 'leave' : 'walk-' + next;
+  },
+  // Walk back instead of reversing: the trip ends here and WalkBack, which resumes hunting on arrival, takes over.
+  leave() {
+    const t = this.trip, gp = World.gp;
+    if (gp.inventoryPending || World.isCasting()) return;
+    if (t.supplies.some(s => Restock.count(s.refObjId) < s.target) || this.damaged().length || !t.revival && !this.scroll(0x09ec)) return this.fail('Final supply, repair or travel-scroll check failed.');
+    if (World.freeBagSlots() <= 1) return this.fail('Returned to town; free at least two character bag slots before hunting again.');
+    if (!Hunt.cfg().center) return this.fail('No saved hunting spot to walk back to.');
+    this.trip = null; Hunt.targetGid = Hunt.lootGid = 0; this.restartClocks();
+    WalkBack.start(true);
+    if (!WalkBack.active) { this.message = 'Town cycle stopped: the walk back to the hunting spot did not start.'; Hunt.stop(this.message); return; }
+    this.message = 'Town service complete; walking back to the hunting spot.';
+    Log.info(this.message); UI.toast(this.message);
   },
   enter(phase) {
     const t = this.trip;
@@ -609,15 +628,16 @@ const Town = {
     t.buySkipped ||= [];
     let s = t.supplies.find(s => !t.buySkipped.includes(s.refObjId) && Restock.count(s.refObjId) < s.target);
     if (!s) {
-      // Refill held travel scrolls from gold offers only. Never buy from Item Mall.
-      for (const type of [0x09ec, 0x19ec]) {
+      // Refill held travel scrolls from gold offers only. Never buy from Item Mall. A missing reverse scroll is not an
+      // error: the trip walks back instead.
+      for (const type of this.walks() ? [0x09ec] : [0x09ec, 0x19ec]) {
         const count = World.items().filter(i => (i.typeFlags & 0xfffc) === type).reduce((n, i) => n + (i.quantity ?? 1), 0);
         if (count >= 2) continue;
         const offer = shop.offers.find(o => (o.currency === undefined || o.currency === 1) &&
           (o.items || o.previews || []).some(i => i.refObjId === o.refObjId && (i.typeFlags & 0xfffc) === type) &&
           (!o.contents?.length || o.contents.length === 1 && o.contents[0].refObjId === o.refObjId && o.contents[0].quantity === 1));
         if (offer) { s = { kind: 'scroll', refObjId: offer.refObjId, target: Restock.count(offer.refObjId) + 2 - count }; break; }
-        if (!count) return this.fail('Travel scrolls unavailable at this merchant. Carry spares.');
+        if (!count && type === 0x09ec) return this.fail('Travel scrolls unavailable at this merchant. Carry spares.');
       }
     }
     if (!s) { this.enter('close-vendor'); return; }
@@ -769,6 +789,7 @@ const Town = {
     else if (t.phase === 'sell') this.sell();
     else if (t.phase === 'ammo') this.ammo();
     else if (t.phase === 'repair') this.repair();
+    else if (t.phase === 'leave') this.leave();
     else if (t.phase.startsWith('close-')) {
       if (now() - t.at > 15000) this.fail('NPC window did not close.');
       else this.close(this.closeNext(t.phase));
