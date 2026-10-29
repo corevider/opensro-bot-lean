@@ -782,6 +782,42 @@ test('chosen primary and secondary gear is protected and balance moves rule item
   assert.equal(cmd.kind, 'cos-transfer'); assert.equal(cmd.toCos, true); assert.equal(cmd.source, 20, 'the rule item goes to the roomier pet');
   assert.ok(free >= 0);
 });
+test('the chosen weapons and shield stay listed when worn, carried elsewhere or changed by alchemy', () => {
+  const f = townFixture(), gp = f.World.gp, worn = gp.inventory[0];
+  f.Items.name = id => 'Item ' + id;
+  const spare = { slot: 20, refObjId: 901, typeFlags: 44 | (6 << 7), plus: 2, quantity: 1 }, copy = { ...spare, slot: 21 };
+  gp.inventory.push(spare, copy, { slot: 22, refObjId: 950, typeFlags: 12 | (4 << 7), quantity: 1 });
+  const rows = slot => Array.from(f.ItemRules.gearOptions(slot), ([, text]) => text);
+  assert.deepEqual(rows('primaryWeapon'), ['None', 'Item 900 (worn)', 'Item 901 +2 (bag 8)'], 'worn gear is listed, identical copies once');
+  assert.deepEqual(rows('shield'), ['None', 'Item 950 (bag 10)'], 'shields only');
+  const key = f.BuffGear.key(spare);
+  f.ItemRules.setGear('secondaryWeapon', key); f.ItemRules.trackGear();
+  spare.slot = 6; worn.slot = 20; f.ItemRules.trackGear();
+  assert.equal(f.ItemRules.cfg().gear.secondaryWeapon, key, 'wearing it keeps the choice');
+  assert.deepEqual(rows('secondaryWeapon'), ['None', 'Item 901 +2 (worn)', 'Item 900 (bag 8)']);
+  gp.inventory = gp.inventory.filter(i => i !== copy); spare.plus = 3; f.ItemRules.trackGear();
+  assert.equal(f.ItemRules.cfg().gear.secondaryWeapon, f.BuffGear.key(spare), 'a new plus in the same slot keeps the choice');
+  assert.equal(f.ItemRules.guarded(spare), true, 'and its protection');
+  assert.ok(f.Log.lines.some(l => /Item 901 \+2 is now Item 901 \+3/.test(l.text)));
+  gp.inventory = gp.inventory.filter(i => i !== spare); f.ItemRules.trackGear();
+  assert.equal(rows('secondaryWeapon').at(-1), 'Item 901 +3 (not in your bag)', 'an item that is not carried stays chosen');
+  gp.inventory.push({ slot: 6, refObjId: 902, typeFlags: 44 | (6 << 7), quantity: 1 }); f.ItemRules.trackGear();
+  assert.equal(f.ItemRules.cfg().gear.secondaryWeapon, f.BuffGear.key(spare), 'another item in that slot does not take the choice');
+  gp.inventory = gp.inventory.filter(i => i.slot !== 6); f.ItemRules.trackGear();
+  gp.inventory.push({ ...spare, slot: 6, plus: 0 }); f.ItemRules.trackGear();
+  assert.equal(f.ItemRules.cfg().gear.secondaryWeapon, f.BuffGear.key(spare), 'a drop landing in the emptied slot is not adopted');
+  f.BuffGear.bad.add(f.BuffGear.key(spare)); f.ItemRules.setGear('secondaryWeapon', f.BuffGear.key(spare));
+  assert.equal(f.BuffGear.bad.has(f.BuffGear.key(spare)), false, 'picking it again clears a refusal');
+});
+test('the stall never offers the weapons and shield chosen under Combat', () => {
+  const f = stallFixture(); stallBag(f);
+  const sword = { slot: 15, refObjId: 64, typeFlags: 44 | (6 << 7), quantity: 1, tooltip: { fields: { canSell: 1 } } };
+  f.World.gp.inventory.push(sword);
+  f.Settings.profile.stall.prices = { 62: 150, 64: 9000 };
+  assert.deepEqual(Array.from(f.Stall.candidates(), i => i.slot), [13, 15]);
+  f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(sword));
+  assert.deepEqual(Array.from(f.Stall.candidates(), i => i.slot), [13], 'a price does not sell the chosen weapon');
+});
 test('item rules drop from the bag and the pet, one at a time, never worn gear', () => {
   const f = townFixture(), gp = f.World.gp;
   gp.inventory.push({ slot: 20, refObjId: 1003, typeFlags: 108, quantity: 1 });
@@ -2264,6 +2300,16 @@ test('a share holds only what differs from the defaults and nothing personal', (
   assert.equal(p.macro.buffs[0].gearSet, 0, 'a weapon set assignment means nothing without the set');
   assert.ok(JSON.parse(f.ProfileShare.text(false)).profile.hunt.center, 'the full backup keeps the positions');
   const defaults = f.ProfileShare.text(true); assert.ok(defaults.length < 600, 'a share stays short');
+});
+test('the chosen weapons and shield are personal and the old two shields become one', () => {
+  const f = shareFixture(); f.Settings.profile.items.gear.primaryWeapon = 'my-weapon';
+  assert.equal(f.ProfileShare.text(true).includes('my-weapon'), false, 'not in a share');
+  f.Settings.profile.items.gear.shield = 'my-shield';
+  assert.equal(f.ProfileShare.build({ items: { gear: { shield: 'theirs' } } }).items.gear.shield, 'my-shield', 'an import keeps your own');
+  assert.deepEqual(plain(f.botProfile({ items: { gear: { primaryWeapon: 'a', primaryShield: null, secondaryShield: 's2' } } }).items.gear),
+    { primaryWeapon: 'a', secondaryWeapon: null, shield: 's2' });
+  assert.equal(f.botProfile({ items: { gear: { primaryShield: 's1', secondaryShield: 's2' } } }).items.gear.shield, 's1', 'the primary shield first');
+  assert.deepEqual(plain(f.botProfile({ items: { gear: { shield: 'x', primaryShield: 's1' } } }).items.gear), { primaryWeapon: null, secondaryWeapon: null, shield: 'x' });
 });
 test('importing previews the changes, keeps your own positions, applies once and can be undone', async () => {
   const sender = shareFixture(), code = await sender.ProfileShare.encode(sender.ProfileShare.text(true));

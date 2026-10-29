@@ -1,5 +1,5 @@
 // Sharing settings. A share code or file holds only what differs from the defaults and nothing personal: positions,
-// town and merchant points, walking routes, buff weapon sets and the wardrobe stay out. Importing never runs
+// town and merchant points, walking routes, buff weapon sets, the chosen weapons and shield, and the wardrobe stay out. Importing never runs
 // anything: the text is parsed as data, every field is checked against the defaults, and a preview lists the changes
 // before anything is applied. The previous settings are kept so one press undoes an import.
 const SHARE = { apps: ['nixxane-bot', 'sro-bot-lean'], format: 1, maxChars: 300000, maxNodes: 20000, plain: 'nixxane0:', packed: 'nixxane1:' };
@@ -11,12 +11,12 @@ const ProfileShare = {
   personal(p) {
     const r = p.potion.restock, t = r.town;
     return this.clone({ center: p.hunt.center, vendor: r.vendor, route: r.route, offers: r.offers,
-      town: { arrival: t.arrival, storage: t.storage, vendor: t.vendor, smith: t.smith, gate: t.gate }, buffSets: p.macro.buffSets, wardrobe: p.wardrobe, follow: p.trace.name, pullPoints: p.lure.points });
+      town: { arrival: t.arrival, storage: t.storage, vendor: t.vendor, smith: t.smith, gate: t.gate }, buffSets: p.macro.buffSets, gear: p.items.gear, wardrobe: p.wardrobe, follow: p.trace.name, pullPoints: p.lure.points });
   },
   restore(p, own) {
     const r = p.potion.restock, t = r.town;
     p.hunt.center = own.center; r.vendor = own.vendor; r.route = own.route; r.offers = own.offers;
-    Object.assign(t, own.town); p.macro.buffSets = own.buffSets; p.wardrobe = own.wardrobe; p.trace.name = own.follow; p.lure.points = own.pullPoints;
+    Object.assign(t, own.town); p.macro.buffSets = own.buffSets; p.items.gear = own.gear; p.wardrobe = own.wardrobe; p.trace.name = own.follow; p.lure.points = own.pullPoints;
     // A buff assigned to a weapon set means nothing without the sets.
     for (const b of p.macro.buffs) if (b && !p.macro.buffSets.some(s => s.id === Number(b.gearSet))) b.gearSet = 0;
     return p;

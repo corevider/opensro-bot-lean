@@ -2,7 +2,7 @@ const DISCORD_URL = 'https://discord.gg/Y5H5ZyfQ7u';
 const NOTES_URL = 'https://nixxane.github.io/opensro-bot-lean-site/#patch-notes';
 const CLASS_KEYS = ['normal', 'champion', 'giant', 'party', 'elite', 'unique'];
 const DEFAULT_PROFILE = {
-  items: { rules: {}, balance: false, gear: { primaryWeapon: null, primaryShield: null, secondaryWeapon: null, secondaryShield: null } },
+  items: { rules: {}, balance: false, gear: { primaryWeapon: null, secondaryWeapon: null, shield: null } },
   stall: { title: '', greeting: '', network: true, closeWhenEmpty: true, prices: {} },
   alchemy: { target: 3, limit: 20, elixir: 0, powder: false, use: { luck: false, steady: false, immortal: false, astral: false }, stones: { luck: 1, steady: 1, immortal: 1, astral: 1 }, stoneLimit: 0,
     // The plus from which each helper is used: a failure from +5 up can destroy the item (Steady and Immortal matter from there),
@@ -101,6 +101,10 @@ function botProfile(input) {
   if (oldStones && !input.alchemy?.use) for (const key of Object.keys(result.alchemy.use)) {
     const n = Number(oldStones[key]) || 0; result.alchemy.use[key] = n > 0; result.alchemy.stones[key] = Math.min(6, Math.max(1, n));
   }
+  // A character wears one shield: the old primary and secondary shield become that one, the primary first.
+  const gear = result.items.gear, oldGear = input.items?.gear;
+  if (oldGear && typeof oldGear === 'object' && !('shield' in oldGear)) gear.shield = [oldGear.primaryShield, oldGear.secondaryShield].find(k => typeof k === 'string' && k) || null;
+  delete gear.primaryShield; delete gear.secondaryShield;
   return result;
 }
 const Settings = {

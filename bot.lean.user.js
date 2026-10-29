@@ -186,7 +186,7 @@ const DISCORD_URL = 'https://discord.gg/Y5H5ZyfQ7u';
 const NOTES_URL = 'https://nixxane.github.io/opensro-bot-lean-site/#patch-notes';
 const CLASS_KEYS = ['normal', 'champion', 'giant', 'party', 'elite', 'unique'];
 const DEFAULT_PROFILE = {
-  items: { rules: {}, balance: false, gear: { primaryWeapon: null, primaryShield: null, secondaryWeapon: null, secondaryShield: null } },
+  items: { rules: {}, balance: false, gear: { primaryWeapon: null, secondaryWeapon: null, shield: null } },
   stall: { title: '', greeting: '', network: true, closeWhenEmpty: true, prices: {} },
   alchemy: { target: 3, limit: 20, elixir: 0, powder: false, use: { luck: false, steady: false, immortal: false, astral: false }, stones: { luck: 1, steady: 1, immortal: 1, astral: 1 }, stoneLimit: 0,
     // The plus from which each helper is used: a failure from +5 up can destroy the item (Steady and Immortal matter from there),
@@ -285,6 +285,10 @@ function botProfile(input) {
   if (oldStones && !input.alchemy?.use) for (const key of Object.keys(result.alchemy.use)) {
     const n = Number(oldStones[key]) || 0; result.alchemy.use[key] = n > 0; result.alchemy.stones[key] = Math.min(6, Math.max(1, n));
   }
+  // A character wears one shield: the old primary and secondary shield become that one, the primary first.
+  const gear = result.items.gear, oldGear = input.items?.gear;
+  if (oldGear && typeof oldGear === 'object' && !('shield' in oldGear)) gear.shield = [oldGear.primaryShield, oldGear.secondaryShield].find(k => typeof k === 'string' && k) || null;
+  delete gear.primaryShield; delete gear.secondaryShield;
   return result;
 }
 const Settings = {
@@ -7839,10 +7843,11 @@ const Stall = {
   stall() { const s = World.gp?.stall; return s && s.phase !== 'none' ? s : null; },
   offers() { return this.stall()?.phase === 'owner' ? this.stall().offers || [] : []; },
   // Bag items with a price that are not already offered or skipped. A price is explicit intent, so the general
-  // loot protections do not apply; stackables offer their whole stack, equipment one piece.
+  // loot protections do not apply, except for the weapons and shield chosen under Combat, which are never sold;
+  // stackables offer their whole stack, equipment one piece.
   candidates(r = this.run) {
     const offered = new Set(this.offers().map(o => o.bagSlot)), skip = r ? r.skip : new Set();
-    return World.items().filter(i => !offered.has(i.slot) && !skip.has(i.slot) && this.price(i.refObjId) > 0);
+    return World.items().filter(i => !offered.has(i.slot) && !skip.has(i.slot) && this.price(i.refObjId) > 0 && !ItemRules.guarded(i));
   },
   // ownStall: the session's own stall is expected mid-run; only a fresh start refuses any open stall.
   blocked(ownStall = false) {
@@ -8338,7 +8343,7 @@ const BuffGear = {
   },
   // A shield skill is due while no shield is worn, or a two-handed weapon is.
   shieldMissing(id) { return this.shieldSkill(id) && !this.shield(this.at(7)); },
-  // The bag shield to wear for a shield skill: the primary / secondary shield picked on the Items page first.
+  // The bag shield to wear for a shield skill: the shield chosen under Combat first.
   pickShield() {
     const gp = World.gp, list = this.items().filter(i => i.slot >= (gp.equipmentSlotCount || 13) && this.shield(i) && (i.durability ?? 1) > 0 && !this.bad.has(this.key(i)));
     list.sort((a, b) => (ItemRules.guarded(b) ? 1 : 0) - (ItemRules.guarded(a) ? 1 : 0) || (b.plus ?? 0) - (a.plus ?? 0) || a.slot - b.slot);
@@ -8352,7 +8357,7 @@ const BuffGear = {
     const gp = World.gp, level = gp?.progression?.level;
     const list = this.items().filter(i => i.slot >= (gp.equipmentSlotCount || 13) && this.weapon(i) && kinds.includes(this.kind(i)) &&
       (i.durability ?? 1) > 0 && !this.bad.has(this.key(i)) && !(level >= 0 && Town.requiredLevel(i) > level));
-    // The secondary weapon chosen on the Items page comes first, then the highest plus.
+    // A weapon chosen under Combat comes first, then the highest plus.
     const chosen = i => ItemRules.guarded(i) ? 1 : 0;
     list.sort((a, b) => chosen(b) - chosen(a) || (b.plus ?? 0) - (a.plus ?? 0) || a.slot - b.slot);
     return list[0] || null;
@@ -9410,6 +9415,7 @@ const Controller = {
       AutoMastery.tick();
       StatPoints.tick();
       Potion.tick();
+      ItemRules.trackGear();
       if (!ItemRules.dropTick()) ItemRules.balanceTick();
       Loot.checkPetFull();
       if (Town.tick()) { this.mode = 'town service'; return; }
@@ -10939,7 +10945,7 @@ for (const [name, method] of [['Follow party member', 'tick']]) {
 
 
 // Sharing settings. A share code or file holds only what differs from the defaults and nothing personal: positions,
-// town and merchant points, walking routes, buff weapon sets and the wardrobe stay out. Importing never runs
+// town and merchant points, walking routes, buff weapon sets, the chosen weapons and shield, and the wardrobe stay out. Importing never runs
 // anything: the text is parsed as data, every field is checked against the defaults, and a preview lists the changes
 // before anything is applied. The previous settings are kept so one press undoes an import.
 const SHARE = { apps: ['nixxane-bot', 'sro-bot-lean'], format: 1, maxChars: 300000, maxNodes: 20000, plain: 'nixxane0:', packed: 'nixxane1:' };
@@ -10951,12 +10957,12 @@ const ProfileShare = {
   personal(p) {
     const r = p.potion.restock, t = r.town;
     return this.clone({ center: p.hunt.center, vendor: r.vendor, route: r.route, offers: r.offers,
-      town: { arrival: t.arrival, storage: t.storage, vendor: t.vendor, smith: t.smith, gate: t.gate }, buffSets: p.macro.buffSets, wardrobe: p.wardrobe, follow: p.trace.name, pullPoints: p.lure.points });
+      town: { arrival: t.arrival, storage: t.storage, vendor: t.vendor, smith: t.smith, gate: t.gate }, buffSets: p.macro.buffSets, gear: p.items.gear, wardrobe: p.wardrobe, follow: p.trace.name, pullPoints: p.lure.points });
   },
   restore(p, own) {
     const r = p.potion.restock, t = r.town;
     p.hunt.center = own.center; r.vendor = own.vendor; r.route = own.route; r.offers = own.offers;
-    Object.assign(t, own.town); p.macro.buffSets = own.buffSets; p.wardrobe = own.wardrobe; p.trace.name = own.follow; p.lure.points = own.pullPoints;
+    Object.assign(t, own.town); p.macro.buffSets = own.buffSets; p.items.gear = own.gear; p.wardrobe = own.wardrobe; p.trace.name = own.follow; p.lure.points = own.pullPoints;
     // A buff assigned to a weapon set means nothing without the sets.
     for (const b of p.macro.buffs) if (b && !p.macro.buffSets.some(s => s.id === Number(b.gearSet))) b.gearSet = 0;
     return p;
@@ -13909,9 +13915,9 @@ const ITEM_WEAPON = { CH: { BLADE: 'Blade', SWORD: 'Sword', TBLADE: 'Glaive', SP
 const ITEM_ACCESSORY = { NECKLACE: 'Necklace', EARRING: 'Earring', RING: 'Ring' };
 const ITEM_DROP_CONFIRM_MS = 5000;
 const ITEM_BALANCE_CONFIRM_MS = 5000;
-const ITEM_GEAR_SLOTS = ['primaryWeapon', 'primaryShield', 'secondaryWeapon', 'secondaryShield'];
+const ITEM_GEAR_SLOTS = ['primaryWeapon', 'secondaryWeapon', 'shield'];
 const ItemRules = {
-  infos: new Map(), dropping: null, dropBan: new Map(), message: '', balancing: null, balanceBan: new Map(),
+  infos: new Map(), dropping: null, dropBan: new Map(), message: '', balancing: null, balanceBan: new Map(), gearSlots: {}, gearOwner: '',
   cfg() { return Settings.profile.items; },
   get(id) { return this.cfg().rules[id] || null; },
   // change: { pick: 'yes' | 'no' | null, act: 'store' | 'sell' | 'keep' | 'drop' | null }; null clears that part.
@@ -13926,19 +13932,55 @@ const ItemRules = {
     Settings.saveProfile();
   },
   count() { return Object.keys(this.cfg().rules).length; },
-  // The primary and secondary weapon / shield picked on the Items page, as BuffGear item keys. Identical copies share a key,
-  // so every copy is protected. Protected gear is never sold, stored, dropped or moved to the pet.
+  // The primary and secondary weapon and the shield picked under Combat, as BuffGear item keys. Identical copies share a
+  // key, so every copy is protected. Protected gear is never sold, stored, dropped or moved to the pet, whatever its rule.
   gearKeys() { const g = this.cfg().gear || {}; return ITEM_GEAR_SLOTS.map(k => g[k]).filter(Boolean); },
   guarded(item) { const keys = this.gearKeys(); return !!item && keys.length > 0 && keys.includes(BuffGear.key(item)); },
-  // Weapons and shields the character can choose from: worn first, then the bag.
+  // Weapons or shields the character can choose from: worn first, then the bag. Identical copies are listed once.
   gearChoices(shield) {
-    return World.items().filter(i => shield ? BuffGear.shield(i) : BuffGear.weapon(i))
+    const list = BuffGear.items().filter(i => shield ? BuffGear.shield(i) : BuffGear.weapon(i))
       .sort((a, b) => (a.slot > 7) - (b.slot > 7) || a.slot - b.slot);
+    return list.filter((i, n) => list.findIndex(j => BuffGear.key(j) === BuffGear.key(i)) === n);
+  },
+  // Select rows for one gear choice. The chosen item stays listed while it is not carried (warehouse, pet, trade).
+  gearOptions(slot) {
+    const equipped = World.gp?.equipmentSlotCount || 13, chosen = this.cfg().gear?.[slot];
+    const rows = this.gearChoices(slot === 'shield').map(i => [BuffGear.key(i),
+      `${Items.name(i.refObjId)}${i.plus ? ' +' + i.plus : ''} (${i.slot < equipped ? 'worn' : 'bag ' + (i.slot - equipped + 1)})`]);
+    if (chosen && !rows.some(([key]) => key === chosen)) rows.push([chosen, this.gearName(chosen) + ' (not in your bag)']);
+    return [['', 'None'], ...rows];
+  },
+  gearRef(key) { try { return JSON.parse(key)[0]; } catch { return 0; } },
+  gearName(key) {
+    try { const [ref, , plus] = JSON.parse(key); return Items.name(ref) + (plus ? ' +' + plus : ''); } catch { return 'Unknown item'; }
   },
   setGear(slot, key) {
     if (!ITEM_GEAR_SLOTS.includes(slot)) return;
     (this.cfg().gear ||= {})[slot] = key || null;
+    delete this.gearSlots[slot];
+    if (key) BuffGear.bad.delete(key); // picked again: the game may take it now (a level up)
     Settings.saveProfile();
+  },
+  // Chosen gear is followed by its slot: wearing it keeps its key, and when alchemy changes its plus or stones the item
+  // in the same slot with the same item number takes the choice (and its protection) over.
+  trackGear() {
+    const g = this.cfg().gear, gp = World.gp, owner = Settings.profileKey + '|' + World.charName;
+    if (owner !== this.gearOwner) { this.gearOwner = owner; this.gearSlots = {}; }
+    if (!g || !gp || gp.inventoryPending || !World.inWorld()) return;
+    const items = BuffGear.items();
+    for (const slot of ITEM_GEAR_SLOTS) {
+      const key = g[slot];
+      if (!key) continue;
+      const found = items.find(i => BuffGear.key(i) === key);
+      if (found) { this.gearSlots[slot] = found.slot; continue; }
+      const was = items.find(i => i.slot === this.gearSlots[slot]);
+      // An empty slot means the item left (destroyed, stored, traded): forget the slot, so a later drop there is not adopted.
+      if (!was) { delete this.gearSlots[slot]; continue; }
+      if (was.refObjId !== this.gearRef(key) || this.gearKeys().includes(BuffGear.key(was))) continue;
+      g[slot] = BuffGear.key(was);
+      Settings.saveProfile();
+      Log.info('Chosen gear changed (' + this.gearName(key) + ' is now ' + this.gearName(g[slot]) + '); still protected.');
+    }
   },
   // What the codename says about an item, for the filters and the table. Cached per item.
   info(id) {
@@ -14966,9 +15008,9 @@ const UI = {
       this.pane.append(subtabs);
       if (this.combatTab === 'Hunt area') this.sections('combatHuntArea', 'combatMonsters', 'combatLure');
       if (this.combatTab === 'Skills') this.sections('combatRotation', 'combatOptions', 'combatBerserk');
-      if (this.combatTab === 'Buffs & imbue') this.sections('combatBuffs', 'combatImbue');
+      if (this.combatTab === 'Buffs & imbue') this.sections('combatGear', 'combatBuffs', 'combatImbue');
     } else if (this.current === 'Loot') {
-      this.sections('lootCollection', 'lootWho');
+      this.sections('lootCollection', 'lootWho', 'lootBalance');
     } else if (this.current === 'Supplies') {
       this.sections('suppliesPotions', 'suppliesRestock');
       this.pane.append(el('p', 'Town trips, what starts them, and arrows and bolts are on the Town page.', 'muted'));
@@ -15004,10 +15046,10 @@ const UI = {
     return [
       { name: 'Settings', icon: 'action\\icon_cha_helper', pages: ['Supplies', 'Loot', 'Town', 'Combat', 'Settings'], sections: [
         ['suppliesPotions', 'Autopotion settings'], ['suppliesRestock', 'Buy settings'], ['townWhen', 'Back town settings'],
-        ['lootCollection', 'Pick settings'], ['lootWho', 'Who picks up what'], ['combatMonsters', 'Attack preferences'],
+        ['lootCollection', 'Pick settings'], ['lootWho', 'Who picks up what'], ['lootBalance'], ['combatMonsters', 'Attack preferences'],
         ['combatBerserk', 'Berserk settings'], ['settingsBehaviour', 'Attack behaviour / Protection'], ['settingsObstacles'], ['settingsAntiStuck']] },
       { name: 'Skills', icon: 'action\\icon_cha_auto_attack', pages: ['Combat'], sections: [
-        ['combatRotation'], ['combatOptions'], ['combatBuffs'], ['combatImbue']] },
+        ['combatRotation'], ['combatOptions'], ['combatGear'], ['combatBuffs'], ['combatImbue']] },
       { name: 'Items/Storage', icon: 'action\\cos_cmd_inventory', pages: ['Items', 'Town'], draw() {
         this.drawItems(); this.sections('townTrip', 'townCycle', 'townAmmo'); } },
       { name: 'Training place', icon: 'action\\icon_cha_camp', pages: ['Combat', 'Party'], sections: [['combatHuntArea', 'Training place'], ['partyTrace'], ['combatLure']] },
@@ -15176,6 +15218,12 @@ const UI = {
         ...[['giant', 'Giants'], ['giantParty', 'Giant party'], ['titan', 'Titans'], ['unique', 'Uniques'], ['elite', 'Elites'], ['party', 'Party monsters'], ['champion', 'Champions'], ['normal', 'Normal monsters']]
           .map(([key, label]) => this.check(label, () => M().berserkClasses[key], v => M().berserkClasses[key] = v))));
   },
+  section_combatGear(host) {
+    const pick = (title, slot) => this.select(title, () => ItemRules.gearOptions(slot), () => ItemRules.cfg().gear?.[slot] || '', v => ItemRules.setGear(slot, v));
+    host.append(this.group('Weapons and shield',
+      pick('Primary weapon', 'primaryWeapon'), pick('Secondary weapon', 'secondaryWeapon'), pick('Shield', 'shield'),
+      el('p', 'Pick from what you wear or carry. The choice stays when you wear the item and when alchemy changes its plus or stones. Chosen gear is never sold, stored, dropped or moved to the pet, even with an item rule, and buff swaps wear the secondary weapon first.', 'muted')));
+  },
   section_combatBuffs(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
       BuffGear.draw(host);
@@ -15213,6 +15261,11 @@ const UI = {
           v => { if (v === 'off') L()[key] = false; else { L()[key] = true; (L().by ||= {})[key] = v; } Loot.reset(); }));
       kinds.append(el('p', 'Each kind of drop is either left alone, taken by your pickup pet, or taken by the character. The pet collects while you fight and fills its own bag; the character walks to the item and uses your bag, so give it only the few kinds you want on you (for example potions or pills). The default collector decides for kinds you have not set yourself and for names under Always include.', 'muted'));
       host.append(kinds);
+  },
+  section_lootBalance(host) {
+    host.append(this.group('Bag and pet space',
+      this.check('Balance free slots with the pickup pet', () => ItemRules.cfg().balance, v => ItemRules.cfg().balance = v),
+      el('p', 'While hunting, items with a Sell or Store rule move to the bag or pet, whichever has more free slots. Supplies and the weapons and shield chosen under Combat never move.', 'muted')));
   },
   section_suppliesPotions(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
@@ -15563,7 +15616,7 @@ const UI = {
     const nearby = el('input'); nearby.type = 'checkbox'; nearby.checked = !!f.nearby; nearby.setAttribute('aria-label', 'Only items on the ground now');
     nearby.addEventListener('change', () => { f.nearby = nearby.checked; refresh(); });
     const nearbyLabel = el('label', null, 'field'); nearbyLabel.append(el('span', 'Only items on the ground now'), nearby);
-    const filters = this.group('Choose items',
+    const filters = this.group('Filter items',
       choose('Item group', [['all', 'All items'], ['equipment', 'Equipment'], ['weapon', 'Weapons'], ['armour', 'Armour and shields'], ['accessory', 'Accessories'], ['potion', 'Potions'],
         ['pill', 'Pills'], ['alchemy', 'Alchemy'], ['ammo', 'Arrows and bolts'], ['scroll', 'Scrolls'], ['pet', 'Pet items'], ['quest', 'Quest items'], ['mall', 'Item mall'], ['other', 'Other']], 'group'),
       choose('Race', [['', 'Any'], ['CH', 'Chinese'], ['EU', 'European']], 'race'),
@@ -15575,15 +15628,7 @@ const UI = {
     table.setAttribute('role', 'table'); table.setAttribute('aria-label', 'Item rules');
     const rules = this.group('Item rules', summary, bulk, table, pager,
       el('p', 'Pick: always takes the item whatever the Loot switches say, never leaves it. A rule is for that exact item (each size or degree is its own item), so tick Only items on the ground now to find what is dropping and set the rule on those. Store puts it in the warehouse on town trips (also from your bag, except potions and scrolls the trip needs). Sell sells it from the pet at the repair merchant; your own bag is never sold. Keep never stores or sells it. Drop throws it away from your bag or the pet while hunting, and it is never picked up again. Right-click a row for the same choices.', 'muted'));
-    const gearOptions = shield => () => [['', 'None'], ...ItemRules.gearChoices(shield).map(i => [BuffGear.key(i), `${Items.name(i.refObjId)}${i.plus ? ' +' + i.plus : ''} (${i.slot < 8 ? 'worn' : 'bag ' + (i.slot - (World.gp?.equipmentSlotCount || 13) + 1)})`])];
-    const gearPick = (title, slot, shield) => this.select(title, gearOptions(shield), () => ItemRules.cfg().gear?.[slot] || '', v => ItemRules.setGear(slot, v));
-    const gear = this.group('Pet and gear',
-      this.check('Balance free slots with the pickup pet', () => ItemRules.cfg().balance, v => ItemRules.cfg().balance = v),
-      el('p', 'While hunting, items with a Sell or Store rule move to the bag or pet, whichever has more free slots. Gear picked below and supplies never move.', 'muted'),
-      gearPick('Primary weapon', 'primaryWeapon', false), gearPick('Primary shield', 'primaryShield', true),
-      gearPick('Secondary weapon', 'secondaryWeapon', false), gearPick('Secondary shield', 'secondaryShield', true),
-      el('p', 'Pick from worn gear or your bag. Chosen gear is never sold, stored, dropped or moved to the pet, and the secondary weapon is the one buff swaps wear first.', 'muted'));
-    this.pane.append(filters, gear, rules);
+    this.pane.append(filters, rules);
     const set = (ids, change, label) => { ItemRules.set(ids, change); this.toast(`${label}: ${ids.length} item${ids.length === 1 ? '' : 's'}.`); renderTable(); };
     // Bulk buttons ask for a second click when they change more than one item.
     const bulkActions = [['Pick always', { pick: 'yes' }], ['Pick never', { pick: 'no' }], ['Store', { act: 'store' }], ['Sell', { act: 'sell' }], ['Keep', { act: 'keep' }],

@@ -44,7 +44,7 @@ const BuffGear = {
   },
   // A shield skill is due while no shield is worn, or a two-handed weapon is.
   shieldMissing(id) { return this.shieldSkill(id) && !this.shield(this.at(7)); },
-  // The bag shield to wear for a shield skill: the primary / secondary shield picked on the Items page first.
+  // The bag shield to wear for a shield skill: the shield chosen under Combat first.
   pickShield() {
     const gp = World.gp, list = this.items().filter(i => i.slot >= (gp.equipmentSlotCount || 13) && this.shield(i) && (i.durability ?? 1) > 0 && !this.bad.has(this.key(i)));
     list.sort((a, b) => (ItemRules.guarded(b) ? 1 : 0) - (ItemRules.guarded(a) ? 1 : 0) || (b.plus ?? 0) - (a.plus ?? 0) || a.slot - b.slot);
@@ -58,7 +58,7 @@ const BuffGear = {
     const gp = World.gp, level = gp?.progression?.level;
     const list = this.items().filter(i => i.slot >= (gp.equipmentSlotCount || 13) && this.weapon(i) && kinds.includes(this.kind(i)) &&
       (i.durability ?? 1) > 0 && !this.bad.has(this.key(i)) && !(level >= 0 && Town.requiredLevel(i) > level));
-    // The secondary weapon chosen on the Items page comes first, then the highest plus.
+    // A weapon chosen under Combat comes first, then the highest plus.
     const chosen = i => ItemRules.guarded(i) ? 1 : 0;
     list.sort((a, b) => chosen(b) - chosen(a) || (b.plus ?? 0) - (a.plus ?? 0) || a.slot - b.slot);
     return list[0] || null;
