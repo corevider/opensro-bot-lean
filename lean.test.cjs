@@ -1892,7 +1892,7 @@ test('a party buff that cannot swap now does not hold back the others, and a pri
   f.advance(1000); f.Controller.tick();
   assert.equal(f.BuffGear.run, null); assert.deepEqual(casts(f), ['select 60', 'skill 2001 60'], 'Heal goes out while Guard waits for its swap');
   ({ f, c, gp, at, worn, drive } = partyGear());
-  gp.inventory.push({ slot: 7, refObjId: 500, typeFlags: 108, quantity: 500 }, { slot: 14, refObjId: 400, typeFlags: (6 << 11) | (6 << 7) | 44, plus: 0, variance: '1', durability: 100 });
+  gp.inventory.push({ slot: 7, refObjId: 500, typeFlags: 108 | (4 << 7) | (1 << 11), quantity: 500 }, { slot: 14, refObjId: 400, typeFlags: (6 << 11) | (6 << 7) | 44, plus: 0, variance: '1', durability: 100 });
   f.World.skill(2002).admit = null; c.buffs[0].gear = 'primary';
   f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 400)));
   f.Hunt.running = false; c.whileStopped = true;
@@ -5496,6 +5496,40 @@ test('a primary weapon the game refuses is left alone without stopping hunting',
   assert.match(f.BuffGear.message, /would not equip .*until you pick it again/);
   assert.equal(f.BuffGear.bad.has(harp), true); assert.equal(f.BuffGear.combat(), null, 'what is worn is the combat gear again');
   const n = f.commands.length; f.advance(1000); f.BuffGear.tick(); assert.equal(f.commands.length, n, 'no retry');
+});
+test('a bow or crossbow primary wears its own arrows or bolts from the bag, never the other kind', () => {
+  const f = buffGearFixture(), gp = f.World.gp, at = s => gp.inventory.find(i => i.slot === s)?.refObjId;
+  const ammo = (slot, ref, kind, quantity) => ({ slot, refObjId: ref, typeFlags: 108 | (4 << 7) | (kind << 11), quantity });
+  f.Settings.profile.macro.buffs = [];
+  gp.inventory = gp.inventory.filter(i => ![7, 14, 15].includes(i.slot));
+  gp.inventory.push({ slot: 14, refObjId: 400, typeFlags: (12 << 11) | (6 << 7) | 44, plus: 0, variance: '1', durability: 100 },
+    ammo(15, 62, 1, 900), ammo(16, 10376, 2, 40), ammo(17, 10377, 2, 700));
+  f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 400)));
+  assert.equal(f.BuffGear.tick(), true); f.drive();
+  assert.deepEqual([at(6), at(7)], [400, 10377], 'the crossbow with the biggest bolt stack, not the arrows');
+  gp.inventory = gp.inventory.filter(i => i.slot !== 7); f.BuffGear.tick(); f.drive();
+  assert.equal(at(7), 10376, 'used up: the next bolts go on');
+  gp.inventory = gp.inventory.filter(i => i.slot !== 7); const n = f.commands.length;
+  assert.equal(f.BuffGear.tick(), false, 'no bolts left: the crossbow stays as it is'); assert.equal(f.commands.length, n);
+  gp.inventory.push({ slot: 18, refObjId: 401, typeFlags: (6 << 11) | (6 << 7) | 44, plus: 0, variance: '1', durability: 100 }, ammo(7, 10376, 2, 30));
+  f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 401)));
+  f.BuffGear.tick(); f.drive();
+  assert.deepEqual([at(6), at(7)], [401, 62], 'a bow takes the arrows, and the worn bolts go to the bag');
+  assert.ok(gp.inventory.some(i => i.refObjId === 10376 && i.slot >= 13));
+});
+test('a buff on the secondary cleric rod puts the crossbow and its bolts back after', () => {
+  const f = buffGearFixture(), gp = f.World.gp, at = s => gp.inventory.find(i => i.slot === s)?.refObjId;
+  gp.inventory = gp.inventory.filter(i => ![6, 7, 14, 15].includes(i.slot));
+  gp.inventory.push({ slot: 6, refObjId: 400, typeFlags: (12 << 11) | (6 << 7) | 44, plus: 0, variance: '1', durability: 100 },
+    { slot: 7, refObjId: 10376, typeFlags: 108 | (4 << 7) | (2 << 11), quantity: 500 });
+  f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.slot === 6)));
+  f.ItemRules.setGear('secondaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.slot === 13)));
+  f.Settings.profile.macro.buffs = [{ id: 20, group: 20, gearSet: 'secondary', enabled: true, mode: 'hunt' }];
+  const casts = [], cast = f.Combat.cast.bind(f.Combat);
+  f.Combat.cast = (id, ...a) => { casts.push([id, at(6), at(7)]); return cast(id, ...a); };
+  assert.equal(f.BuffGear.tick(), true); f.drive();
+  assert.deepEqual(casts, [[20, 200, undefined]], 'the rod is worn without the bolts');
+  assert.deepEqual([at(6), at(7)], [400, 10376], 'then the crossbow and its bolts');
 });
 test('a chosen shield the game refuses is skipped and the shield worn before goes back on', () => {
   const f = buffGearFixture(), gp = f.World.gp, at = s => gp.inventory.find(i => i.slot === s)?.refObjId;

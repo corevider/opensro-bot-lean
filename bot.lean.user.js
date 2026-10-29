@@ -8366,14 +8366,31 @@ const BuffGear = {
     return list[0] || null;
   },
   setup() { return { weapon: this.key(this.at(6)), shield: this.key(this.at(7)), auto: true }; },
+  // Arrows (kind 1) or bolts (kind 2): ETC items of type 4, known by their type word, codename or this server's item number.
+  isAmmo(i, kind = 0) {
+    if (!i) return false;
+    const tf = i.typeFlags, code = i.codename || Items.data.get(i.refObjId)?.code || '';
+    const found = Number.isInteger(tf) && (tf & 2044) === 620 ? tf >>> 11 : /^ITEM_ETC_AMMO_ARROW/.test(code) || i.refObjId === 62 ? 1 : /^ITEM_ETC_AMMO_BOLT/.test(code) || i.refObjId === 10376 ? 2 : 0;
+    return (found === 1 || found === 2) && (!kind || found === kind) && (i.quantity ?? 1) > 0;
+  },
+  // What a bow (arrows) or a crossbow (bolts) shoots: the worn stack when it fits, otherwise the biggest fitting stack in the bag.
+  ammoFor(weapon) {
+    const kind = this.kind(weapon) === 6 ? 1 : this.kind(weapon) === 12 ? 2 : 0, off = this.at(7), equipped = World.gp?.equipmentSlotCount || 13;
+    if (!kind) return null;
+    if (this.isAmmo(off, kind)) return this.key(off);
+    const stack = this.items().filter(i => i.slot >= equipped && this.isAmmo(i, kind)).sort((a, b) => (b.quantity ?? 1) - (a.quantity ?? 1) || a.slot - b.slot)[0];
+    return stack ? this.key(stack) : null;
+  },
+  // What may sit in the off-hand slot of a set: a shield, or arrows or bolts.
+  offhand(i) { return this.shield(i) || this.isAmmo(i); },
   // The chosen shield when it is carried and the game has not refused it.
   chosenShield() { const k = ItemRules.cfg().gear?.shield; return this.shield(this.findAny(k)) && !this.bad.has(k) ? k : null; },
   // The combat gear: the primary weapon chosen under Combat, with the chosen shield when it is one-handed (or the worn
-  // shield without one) and the worn arrows or bolts when it is two-handed. Null without a usable primary weapon.
+  // shield without one), and with arrows or bolts when it is a bow or crossbow. Null without a usable primary weapon.
   combat() {
     const k = ItemRules.cfg().gear?.primaryWeapon, weapon = this.findAny(k), off = this.at(7);
     if (!this.weapon(weapon) || this.bad.has(k)) return null;
-    const shield = this.oneHanded(this.kind(weapon)) ? this.chosenShield() || (this.shield(off) ? this.key(off) : null) : off && !this.shield(off) ? this.key(off) : null;
+    const shield = this.oneHanded(this.kind(weapon)) ? this.chosenShield() || (this.shield(off) ? this.key(off) : null) : this.ammoFor(weapon);
     return { id: 'gear:primary', name: 'your primary weapon', auto: true, primary: true, weapon: k, shield };
   },
   // What the character goes back to after buffs: the combat gear, or what is worn when no primary weapon is chosen.
@@ -8387,7 +8404,7 @@ const BuffGear = {
     if (kind === 'secondary') {
       const weapon = this.findAny(g.secondaryWeapon);
       if (!this.weapon(weapon)) return 'Choose a secondary weapon under Combat and carry it.';
-      return { id: 'gear:secondary', name: 'your secondary weapon', auto: true, weapon: g.secondaryWeapon, shield: this.oneHanded(this.kind(weapon)) ? this.chosenShield() : null };
+      return { id: 'gear:secondary', name: 'your secondary weapon', auto: true, weapon: g.secondaryWeapon, shield: this.oneHanded(this.kind(weapon)) ? this.chosenShield() : this.ammoFor(weapon) };
     }
     if (!this.chosenShield()) return 'Choose a shield under Combat and carry it.';
     const weapon = [this.findAny(g.primaryWeapon), this.findAny(g.secondaryWeapon), this.at(6)].find(w => this.weapon(w) && this.oneHanded(this.kind(w)));
@@ -8498,7 +8515,7 @@ const BuffGear = {
       const name = set === home ? 'your combat gear' : set.auto ? set.name : 'the saved set "' + set.name + '"';
       if (!this.lookup(set, set.weapon)) return `Cannot find ${name}: its weapon is not in your bag or equipped (or two copies look identical). Save the buff set again.`;
       if (!this.weapon(this.lookup(set, set.weapon))) return `${name} is not a weapon any more. Save the buff set again.`;
-      if (set.shield && (!this.lookup(set, set.shield) || !this.homeLike(set, home) && !this.shield(this.lookup(set, set.shield)))) return `Cannot find the shield of ${name} (or two copies look identical). Save the buff set again.`;
+      if (set.shield && (!this.lookup(set, set.shield) || !this.homeLike(set, home) && !this.offhand(this.lookup(set, set.shield)))) return `Cannot find the shield of ${name} (or two copies look identical). Save the buff set again.`;
     }
     // A weapon swaps places with its bag copy, so it needs no space. Only taking the off-hand item off (shield, arrows) needs one free bag slot.
     let offhand = this.key(this.at(7)), stash = false;
@@ -8585,7 +8602,7 @@ const BuffGear = {
   equip(set) {
     if (this.matches(set)) return true;
     const weapon = this.lookup(set, set.weapon), shield = this.lookup(set, set.shield);
-    if (!weapon || !this.weapon(weapon) || set.shield && (!shield || !this.homeLike(set, this.run.home) && !this.shield(shield))) { this.fail('Required equipment missing or ambiguous.'); return false; }
+    if (!weapon || !this.weapon(weapon) || set.shield && (!shield || !this.homeLike(set, this.run.home) && !this.offhand(shield))) { this.fail('Required equipment missing or ambiguous.'); return false; }
     if (this.at(7) && this.key(this.at(7)) !== set.shield) {
       const gp = World.gp;
       let empty = -1;
@@ -15355,7 +15372,7 @@ const UI = {
     host.append(this.group('Weapons and shield',
       pick('Primary weapon', 'primaryWeapon'), pick('Secondary weapon', 'secondaryWeapon'), pick('Shield', 'shield'),
       el('p', 'Pick from what you wear or carry. The choice stays when you wear the item and when alchemy changes its plus or stones. Chosen gear is never sold, stored, dropped or moved to the pet, even with an item rule.', 'muted'),
-      el('p', 'While hunting, the primary weapon is your combat weapon: it is put back on after buff swaps and reconnects, with the shield when it is one-handed. A buff can wear the primary or secondary weapon or the shield (Gear for <skill> below), and automatic swaps try the secondary weapon first.', 'muted')));
+      el('p', 'While hunting, the primary weapon is your combat weapon: it is put back on after buff swaps and reconnects, with the shield when it is one-handed, and with arrows or bolts from your bag for a bow or crossbow. A buff can wear the primary or secondary weapon or the shield (Gear for <skill> below), and automatic swaps try the secondary weapon first.', 'muted')));
   },
   section_combatBuffs(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();

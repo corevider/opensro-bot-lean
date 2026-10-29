@@ -755,7 +755,7 @@ const UI = {
     host.append(this.group('Weapons and shield',
       pick('Primary weapon', 'primaryWeapon'), pick('Secondary weapon', 'secondaryWeapon'), pick('Shield', 'shield'),
       el('p', 'Pick from what you wear or carry. The choice stays when you wear the item and when alchemy changes its plus or stones. Chosen gear is never sold, stored, dropped or moved to the pet, even with an item rule.', 'muted'),
-      el('p', 'While hunting, the primary weapon is your combat weapon: it is put back on after buff swaps and reconnects, with the shield when it is one-handed. A buff can wear the primary or secondary weapon or the shield (Gear for <skill> below), and automatic swaps try the secondary weapon first.', 'muted')));
+      el('p', 'While hunting, the primary weapon is your combat weapon: it is put back on after buff swaps and reconnects, with the shield when it is one-handed, and with arrows or bolts from your bag for a bow or crossbow. A buff can wear the primary or secondary weapon or the shield (Gear for <skill> below), and automatic swaps try the secondary weapon first.', 'muted')));
   },
   section_combatBuffs(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
