@@ -170,6 +170,14 @@ Cmd.itemUseOnPet = function (slot, gid) {
   if (!gp.cosRecords?.some(r => r && r.gid === gid && !r.dead && r.hp > 0)) return false;
   return this.raw({ kind: 'item-use', slot, companionGid: gid }, 'Use on pet: ' + (item.name || item.refObjId));
 };
+// A Grass of life names the dead companion's summoner item instead of a gid (worker ll(): exactly one
+// candidate; here the collar is pinned and must still be in the dead state).
+Cmd.itemUseOnDeadPet = function (slot, collarSlot) {
+  const gp = World.gp, item = gp?.inventory?.find(i => i.slot === slot), collar = gp?.inventory?.find(i => i.slot === collarSlot);
+  if (!item || !collar || gp.inventoryPending || World.isDead() || !this.spaced('item-use') || ItemType.useTarget((item.typeFlags ?? 0) >>> 0) !== 'revival') return false;
+  if (collar.slot < 13 || collar.summon?.state !== 4) return false;
+  return this.raw({ kind: 'item-use', slot, revivalSlot: collarSlot }, 'Revive pet: ' + (item.name || item.refObjId));
+};
 // Player potions keep their priority: the pet kit is only considered when none was used this tick.
 const playerPotionTick = Potion.tick;
 Potion.tick = function () {
