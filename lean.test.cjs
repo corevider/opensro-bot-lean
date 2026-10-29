@@ -1842,6 +1842,88 @@ test('party buffs honour the member list, back off after two misses and never wa
   f.advance(10000); f.Controller.tick(); assert.equal(casts(f).length, 0, 'out of range: nothing cast');
   assert.equal(f.commands.some(c => c.kind === 'move' && c.destination?.x === 600), false, 'and no walking to the member');
 });
+// Party buff Guard (2002) on Tank only, a worn blade (one-handed) and a harp in the bag.
+function partyGear() {
+  const f = fixture(), c = support(f), gp = f.World.gp;
+  const weapon = (slot, ref, sub) => ({ slot, refObjId: ref, typeFlags: (sub << 11) | (6 << 7) | 44, plus: 0, variance: '1', durability: 100 });
+  gp.inventory = [weapon(6, 100, 3), weapon(13, 300, 14)];
+  Object.assign(f.World.skill(2002), { admit: { weaponKinds: [14, 255] }, actionMs: 1000 });
+  f.Settings.profile.macro.buffSwap = true; f.BuffGear.init();
+  c.enabled = true; gp.social.members[1].status = 0x5a; c.buffs = [{ id: 2002, group: 901, only: 'tank' }];
+  const at = s => gp.inventory.find(i => i.slot === s)?.refObjId, worn = [];
+  const cast = f.Combat.cast.bind(f.Combat); f.Combat.cast = (id, ...a) => { worn.push([id, at(6)]); return cast(id, ...a); };
+  const drive = () => {
+    for (let n = 0; n < 80; n++) {
+      f.advance(300); f.Controller.tick();
+      const p = f.BuffGear.run?.pending;
+      if (p) { const from = gp.inventory.find(i => i.slot === p.source), to = gp.inventory.find(i => i.slot === p.destination); from.slot = p.destination; if (to) to.slot = p.source; }
+      if (f.BuffGear.run?.cast && !f.BuffGear.run.cast.accepted) f.bus.emit('cast', { caster: 1, skill: f.BuffGear.run.cast.id });
+      if (!f.BuffGear.run) return;
+    }
+    throw Error('the party buff swap did not finish');
+  };
+  return { f, c, gp, at, worn, drive };
+}
+test('a party buff that needs another weapon is cast after a swap, then the weapon comes back', () => {
+  const { f, at, worn, drive } = partyGear();
+  f.advance(1000); f.Controller.tick();
+  assert.ok(f.BuffGear.run?.party, 'the harp swap starts'); assert.match(f.Support.message, /Guard on Tank: changing weapons/);
+  drive();
+  assert.deepEqual(worn, [[2002, 300]], 'Guard is cast with the harp');
+  assert.deepEqual(casts(f), ['select 60', 'skill 2002 60']);
+  assert.equal(at(6), 100, 'the blade is back'); assert.equal(f.Hunt.running, true);
+  f.World.gp.attachedEffects = [{ gid: 60, skill: 2002, token: 1 }]; f.commands.length = 0;
+  f.advance(2000); f.Controller.tick(); assert.equal(f.BuffGear.run, null, 'Tank has it: no more swaps'); assert.deepEqual(casts(f), []);
+});
+test('a party buff can wear the secondary weapon while hunting is stopped, then the primary comes back', () => {
+  const { f, c, gp, at, worn, drive } = partyGear();
+  gp.inventory.push({ slot: 14, refObjId: 200, typeFlags: (15 << 11) | (6 << 7) | 44, plus: 0, variance: '1', durability: 100 });
+  f.World.skill(2002).admit = null; f.Hunt.running = false; c.whileStopped = true;
+  f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 100)));
+  f.ItemRules.setGear('secondaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 200)));
+  c.buffs[0].gear = 'secondary';
+  f.advance(1000); f.Controller.tick(); drive();
+  assert.deepEqual(worn, [[2002, 200]], 'cast with the secondary staff');
+  assert.equal(at(6), 100, 'then the primary blade'); assert.equal(f.Hunt.running, false);
+});
+test('a party buff that cannot swap now does not hold back the others, and a primary bow keeps its arrows', () => {
+  let { f, c, gp, at, worn, drive } = partyGear();
+  c.buffs.push({ id: 2001, group: 900, only: 'tank' }); f.BuffGear.blocked = () => true;
+  f.advance(1000); f.Controller.tick();
+  assert.equal(f.BuffGear.run, null); assert.deepEqual(casts(f), ['select 60', 'skill 2001 60'], 'Heal goes out while Guard waits for its swap');
+  ({ f, c, gp, at, worn, drive } = partyGear());
+  gp.inventory.push({ slot: 7, refObjId: 500, typeFlags: 108, quantity: 500 }, { slot: 14, refObjId: 400, typeFlags: (6 << 11) | (6 << 7) | 44, plus: 0, variance: '1', durability: 100 });
+  f.World.skill(2002).admit = null; c.buffs[0].gear = 'primary';
+  f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 400)));
+  f.Hunt.running = false; c.whileStopped = true;
+  f.advance(1000); f.Controller.tick();
+  assert.ok(f.BuffGear.run?.party, 'the bow with its arrows passes the gear checks'); drive();
+  assert.deepEqual(worn, [[2002, 400]]); assert.deepEqual([at(6), at(7)], [400, 500]);
+});
+test('a party buff that ends when the weapon changes back waits ten minutes instead of swapping again', () => {
+  const { f, gp, at } = partyGear();
+  f.advance(1000); f.Controller.tick();
+  for (let n = 0; n < 80 && f.BuffGear.run; n++) {
+    f.advance(300); f.Controller.tick();
+    const p = f.BuffGear.run?.pending;
+    if (p) { const from = gp.inventory.find(i => i.slot === p.source), to = gp.inventory.find(i => i.slot === p.destination); from.slot = p.destination; if (to) to.slot = p.source; }
+    if (f.BuffGear.run?.cast) gp.attachedEffects = [{ gid: 60, skill: 2002, token: 1 }];
+    if (at(6) === 100) gp.attachedEffects = [];
+  }
+  assert.equal(f.BuffGear.run, null); assert.equal(at(6), 100);
+  assert.ok(f.Support.misses.get('Tank:901').until > f.World.simNow() + 9 * 60000, 'Guard on Tank waits ten minutes');
+  assert.ok(f.Log.lines.some(l => /ended when the weapon changed back; trying again in ten minutes/.test(l.text)));
+  f.advance(7000); f.Controller.tick(); assert.equal(f.BuffGear.run, null, 'no new swap right away');
+});
+test('party buffs keep the worn weapon with weapon swapping off, and say when no bag weapon fits', () => {
+  let { f, gp, worn } = partyGear();
+  f.Settings.profile.macro.buffSwap = false; f.advance(1000); f.Controller.tick();
+  assert.equal(f.BuffGear.run, null); assert.deepEqual(worn, [[2002, 100]], 'cast with what is worn, as before');
+  ({ f, gp, worn } = partyGear());
+  gp.inventory = gp.inventory.filter(i => i.slot !== 13); f.advance(1000); f.Controller.tick();
+  assert.equal(f.BuffGear.run, null); assert.deepEqual(worn, []);
+  assert.match(f.Support.message, /needs a harp, and none you can use is in your bag/);
+});
 test('party support group heal, self heal and the stopped switch', () => {
   const f = fixture(), c = support(f);
   c.enabled = true; c.group = { id: 2003, group: 902, pct: 60, count: 2 };

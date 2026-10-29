@@ -8466,13 +8466,47 @@ const BuffGear = {
     const gap = Math.max(4000, Math.min((info?.durationMs || 20000) * .85, 600000));
     return now() - (Combat.buffCastAt.get(b.group) ?? -Infinity) >= gap ? id : 0;
   },
-  begin() {
-    if (this.recovery || !Hunt.running || !World.inWorld() || World.isDead() ||
+  // Anything an equipment change must not interrupt.
+  blocked() {
+    return !!(this.recovery || !World.inWorld() || World.isDead() ||
         Combat.busy() || World.isSitting() || World.local()?.mountedOn || World.gp?.inventoryPending ||
         World.gp?.pendingMoves || World.gp?.returnScroll || now() - Manual.lastAt < Hunt.cfg().manualPauseS * 1000 ||
         Town.trip || WalkBack.active || Restock.trip || Restock.recording || Resurrect.trip || now() < Resurrect.holdUntil ||
         Restock.activeShop() || World.gp?.storage || World.gp?.exchange?.open || World.gp?.exchange?.requesting || World.gp?.stall?.phase && World.gp.stall.phase !== 'none' ||
-        Alchemy.run || Alchemy.pending || Loot.active && !Loot.active.petGid || Loot.pressed()) return false;
+        Alchemy.run || Alchemy.pending || Loot.active && !Loot.active.petGid || Loot.pressed());
+  },
+  // The bag weapon (and shield) for a skill the worn weapon cannot cast, or why there is none.
+  autoSet(id, home) {
+    const wantShield = this.shieldMissing(id);
+    let kinds = this.need(id), weapon;
+    if (wantShield) {
+      // A shield only goes with a one-handed weapon: keep the worn one if it is, otherwise wear a one-handed bag weapon.
+      const worn = this.at(6);
+      kinds = kinds ? kinds.filter(k => this.oneHanded(k)) : [];
+      weapon = this.weapon(worn) && this.oneHanded(this.kind(worn)) && (!kinds.length || this.need(id)?.includes(this.kind(worn))) ? worn : this.pick(kinds.length ? kinds : [10, 15, 2, 3, 7, 13]);
+      if (!this.pickShield()) return `${World.skillName(id)} needs a shield, and none you can use is in your bag.`;
+    } else weapon = this.pick(kinds);
+    if (!weapon) return `${World.skillName(id)} needs a ${this.kindName(kinds)}, and none you can use is in your bag.`;
+    const key = this.key(weapon) + (wantShield ? ':shield' : '');
+    const shield = wantShield ? this.key(this.pickShield()) : this.oneHanded(this.kind(weapon)) && this.shield(this.at(7)) ? home.shield : null;
+    return { id: 'auto:' + key, name: weapon.name || Items.name(weapon.refObjId), auto: true, weapon: this.key(weapon), shield };
+  },
+  // Why a swap to these sets and back home cannot start, or '' when it can.
+  problem(home, sets) {
+    if (!home.primary && !this.weapon(this.at(6))) return 'Equip your combat weapon before hunting.';
+    for (const set of [home, ...sets]) {
+      const name = set === home ? 'your combat gear' : set.auto ? set.name : 'the saved set "' + set.name + '"';
+      if (!this.lookup(set, set.weapon)) return `Cannot find ${name}: its weapon is not in your bag or equipped (or two copies look identical). Save the buff set again.`;
+      if (!this.weapon(this.lookup(set, set.weapon))) return `${name} is not a weapon any more. Save the buff set again.`;
+      if (set.shield && (!this.lookup(set, set.shield) || !this.homeLike(set, home) && !this.shield(this.lookup(set, set.shield)))) return `Cannot find the shield of ${name} (or two copies look identical). Save the buff set again.`;
+    }
+    // A weapon swaps places with its bag copy, so it needs no space. Only taking the off-hand item off (shield, arrows) needs one free bag slot.
+    let offhand = this.key(this.at(7)), stash = false;
+    for (const set of [...sets, home]) { if (offhand && offhand !== set.shield) stash = true; offhand = set.shield; }
+    return stash && World.freeBagSlots() < 1 ? 'Buff swaps need one free bag slot to take off your shield.' : '';
+  },
+  begin() {
+    if (!Hunt.running || this.blocked()) return false;
     const queue = [], swap = this.cfg().buffSwap, home = this.home();
     let note = '';
     if (swap) for (const set of this.cfg().buffSets) {
@@ -8494,38 +8528,17 @@ const BuffGear = {
         if (!this.owns(b)) continue;
         const id = this.due(b, true);
         if (!id) continue;
-        const wantShield = this.shieldMissing(id);
-        let kinds = this.need(id), weapon;
-        if (wantShield) {
-          // A shield only goes with a one-handed weapon: keep the worn one if it is, otherwise wear a one-handed bag weapon.
-          const worn = this.at(6);
-          kinds = kinds ? kinds.filter(k => this.oneHanded(k)) : [];
-          weapon = this.weapon(worn) && this.oneHanded(this.kind(worn)) && (!kinds.length || this.need(id)?.includes(this.kind(worn))) ? worn : this.pick(kinds.length ? kinds : [10, 15, 2, 3, 7, 13]);
-          if (!this.pickShield()) { note = `${World.skillName(id)} needs a shield, and none you can use is in your bag.`; continue; }
-        } else weapon = this.pick(kinds);
-        if (!weapon) { note = `${World.skillName(id)} needs a ${this.kindName(kinds)}, and none you can use is in your bag.`; continue; }
-        const key = this.key(weapon) + (wantShield ? ':shield' : '');
-        if (!byWeapon.has(key)) {
-          const shield = wantShield ? this.key(this.pickShield()) : this.oneHanded(this.kind(weapon)) && this.shield(this.at(7)) ? home.shield : null;
-          byWeapon.set(key, { set: { id: 'auto:' + key, name: weapon.name || Items.name(weapon.refObjId), auto: true, weapon: this.key(weapon), shield }, buffs: [] });
-        }
-        byWeapon.get(key).buffs.push({ b, id });
+        const set = this.autoSet(id, home);
+        if (typeof set === 'string') { note = set; continue; }
+        if (!byWeapon.has(set.id)) byWeapon.set(set.id, { set, buffs: [] });
+        byWeapon.get(set.id).buffs.push({ b, id });
       }
       queue.push(...byWeapon.values());
     }
     if (!queue.length) { this.waiting = note; return this.wearCombat(home); }
     // A buff is due, so say why the swap cannot start instead of waiting silently.
-    if (!home.primary && !this.weapon(this.at(6))) return wait('Equip your combat weapon before hunting.');
-    for (const set of [home, ...queue.map(q => q.set)]) {
-      const name = set === home ? 'your combat gear' : set.auto ? set.name : 'the saved set "' + set.name + '"';
-      if (!this.lookup(set, set.weapon)) return wait(`Cannot find ${name}: its weapon is not in your bag or equipped (or two copies look identical). Save the buff set again.`);
-      if (!this.weapon(this.lookup(set, set.weapon))) return wait(`${name} is not a weapon any more. Save the buff set again.`);
-      if (set.shield && (!this.lookup(set, set.shield) || !this.homeLike(set, home) && !this.shield(this.lookup(set, set.shield)))) return wait(`Cannot find the shield of ${name} (or two copies look identical). Save the buff set again.`);
-    }
-    // A weapon swaps places with its bag copy, so it needs no space. Only taking the off-hand item off (shield, arrows) needs one free bag slot.
-    let offhand = this.key(this.at(7)), stash = false;
-    for (const set of [...queue.map(q => q.set), home]) { if (offhand && offhand !== set.shield) stash = true; offhand = set.shield; }
-    if (stash && World.freeBagSlots() < 1) return wait('Buff swaps need one free bag slot to take off your shield.');
+    const why = this.problem(home, queue.map(q => q.set));
+    if (why) return wait(why);
     this.waiting = note;
     if (!Cmd.move(World.pose())) return false;
     Loot.suspend(); Hunt.state = 'buff'; this.run = this.create(home, queue);
@@ -8540,6 +8553,26 @@ const BuffGear = {
     if (!Cmd.move(World.pose())) return false;
     Loot.suspend(); Hunt.state = 'buff'; this.run = this.create(home, []); this.run.restoring = true; this.run.combat = true;
     this.message = 'Wearing your combat gear.';
+    return true;
+  },
+  // The gear a party buff needs, null when what is worn will do, or why it cannot be cast. It follows Swap weapons for
+  // buffs, and for the automatic choice Wear the weapon each buff needs.
+  forParty(b, id) {
+    if (!this.cfg().buffSwap) return null;
+    const home = this.home(), set = BUFF_GEAR_KINDS.includes(b.gear) ? this.gearFor(b.gear, home)
+      : this.cfg().buffAuto && (this.mismatch(id) || this.shieldMissing(id)) ? this.autoSet(id, home) : null;
+    return set && typeof set !== 'string' && this.matches(set) ? null : set;
+  },
+  // Party support: wear the gear, cast the buff at the member, then go back to the combat gear. Also while hunting is stopped.
+  // entry: { party: true, id, due() (still wanted), cast() (sent), shows() (on the member), ended() (gone with the weapon) }.
+  startParty(set, entry) {
+    if (this.run || this.blocked()) return false;
+    const home = this.home(), why = this.problem(home, [set]);
+    if (why) { this.waiting = why; return false; }
+    if (!Cmd.move(World.pose())) return false;
+    Loot.suspend(); if (Hunt.running) Hunt.state = 'buff';
+    this.run = this.create(home, [{ set, buffs: [entry] }]); this.run.party = true;
+    this.message = 'Equipping ' + set.name + ' for a party buff.';
     return true;
   },
   move(source, destination) {
@@ -8571,7 +8604,7 @@ const BuffGear = {
     if (!World.inWorld() || World.isDead()) { this.interrupt('World change or death interrupted buff swaps.', true); return false; }
     if (Manual.lastAt !== r.manualAt) { this.fail('Manual control interrupted buff swaps.'); return true; }
     if (now() - r.at > 120000) { this.fail('Buff gear cycle timed out.'); return true; }
-    if (!Hunt.running || r.signature !== this.signature()) this.cancel();
+    if (!Hunt.running && !r.party || r.signature !== this.signature()) this.cancel();
     if (r.pending) {
       const p = r.pending;
       if (!gp.inventoryPending && this.key(this.at(p.destination)) === p.from && this.key(this.at(p.source)) === p.to) r.pending = null;
@@ -8609,10 +8642,10 @@ const BuffGear = {
       }
     }
     if (r.cast) {
-      const p = r.cast, remaining = World.buffRemaining(p.id);
+      const p = r.cast, remaining = p.party ? (p.entry.shows() ? 1 : 0) : World.buffRemaining(p.id);
       if (remaining > 0) { p.accepted = true; p.visible = true; }
       if (now() < p.until || World.isCasting()) return true;
-      if (!p.accepted) { if (now() - p.at > 10000) { this.skipped.set(p.group, { signature: r.signature, until: now() + 120000, why: 'the cast was not confirmed, trying again in two minutes' }); this.cancel(); this.message = 'Buff cast unconfirmed; restoring combat gear.'; r.cast = null; } return true; }
+      if (!p.accepted) { if (now() - p.at > 10000) { if (!p.party) this.skipped.set(p.group, { signature: r.signature, until: now() + 120000, why: 'the cast was not confirmed, trying again in two minutes' }); this.cancel(); this.message = 'Buff cast unconfirmed; restoring combat gear.'; r.cast = null; } return true; }
       r.effects.push(p); r.cast = null;
     }
     if (Combat.busy() || gp.inventoryPending || World.isSitting() || World.local()?.mountedOn || Loot.pressed()) return true;
@@ -8622,7 +8655,8 @@ const BuffGear = {
       if (!this.equip(r.home)) return true;
       if (!r.restoredAt) { r.restoredAt = now(); return true; }
       if (now() - r.restoredAt < 1000) return true;
-      for (const p of r.effects) if (p.visible && World.buffRemaining(p.id) <= 0) {
+      for (const p of r.effects) if (p.visible && (p.party ? !p.entry.shows() : World.buffRemaining(p.id) <= 0)) {
+        if (p.party) { p.entry.ended(); continue; }
         this.skipped.set(p.group, { signature: r.signature, until: Infinity, why: 'it ended when the weapon changed back, so it stays with your combat weapon until buff settings change' });
         this.message = 'A buff ended after changing weapons; skipped until buff settings change.';
       }
@@ -8634,10 +8668,11 @@ const BuffGear = {
     if (!this.equip(q.set)) return true;
     const entry = q.buffs[0];
     if (!entry) { r.queue.shift(); return true; }
-    if (!this.due(entry.b, q.set.auto)) { q.buffs.shift(); return true; }
-    if (Combat.cast(entry.id, World.skill(entry.id)?.targetRequired ? World.localGid() : 0)) {
-      Combat.buffCastAt.set(entry.b.group, now()); q.buffs.shift();
-      r.cast = { id: entry.id, group: entry.b.group, at: now(), until: now() + Math.max(1000, World.skill(entry.id)?.actionMs || 6000) + 500, accepted: false, visible: false };
+    if (entry.party ? !entry.due() : !this.due(entry.b, q.set.auto)) { q.buffs.shift(); return true; }
+    if (entry.party ? entry.cast() : Combat.cast(entry.id, World.skill(entry.id)?.targetRequired ? World.localGid() : 0)) {
+      if (!entry.party) Combat.buffCastAt.set(entry.b.group, now());
+      q.buffs.shift();
+      r.cast = { id: entry.id, group: entry.party ? null : entry.b.group, party: !!entry.party, entry: entry.party ? entry : null, at: now(), until: now() + Math.max(1000, World.skill(entry.id)?.actionMs || 6000) + 500, accepted: false, visible: false };
       this.message = 'Casting buff; waiting before changing weapons.';
     }
     return true;
@@ -8722,6 +8757,7 @@ Combat.buffs = function (hunting) {
 const SUPPORT_TARGET_FRIEND = 16 | 32;
 const SUPPORT_CONFIRM_MS = 6000;  // a buff cast that shows no effect on the member by then is a miss
 const SUPPORT_BACKOFF_MS = 60000; // after two misses in a row that buff on that member waits a minute
+const SUPPORT_WEAPON_BACKOFF_MS = 10 * 60000; // a buff that ends when the weapon changes back waits ten minutes
 const Support = {
   holdUntil: 0, sent: new Map(), misses: new Map(), message: 'Party support off.',
   cfg() { return Settings.profile.party.support; },
@@ -8768,6 +8804,24 @@ const Support = {
   ready(id) {
     return id && !Combat.blocked?.(id) && Cmd.canCast(id) && Combat.mpOk(id, World.me());
   },
+  // Whether a party buff is still wanted on this member and castable: alive, in range and without it.
+  wants(b, name) {
+    const m = this.members().find(x => x.name === name), id = this.skillOf(b);
+    return !!(this.cfg().enabled && this.ready(id) && m && m.alive && m.inRange && !this.has(m.gid, id));
+  },
+  // Cast a party buff at the member by name (called by a weapon swap once the gear is on).
+  castBuff(b, name) {
+    const m = this.members().find(x => x.name === name), id = this.skillOf(b);
+    if (!m || !this.ready(id) || !this.cast(id, m, `${World.skillName(id)} on ${m.name}`)) return false;
+    this.sent.set(m.name + ':' + b.group, now());
+    return true;
+  },
+  // Whether the member shows the buff at all, and what to do when it ended with the swapped weapon.
+  shows(b, name) { const m = this.members().find(x => x.name === name); return !!m && this.has(m.gid, this.skillOf(b), 0); },
+  ended(b, name) {
+    this.misses.set(name + ':' + b.group, { n: 0, until: now() + SUPPORT_WEAPON_BACKOFF_MS });
+    Log.warn(`Party support: ${World.skillName(this.skillOf(b))} on ${name} ended when the weapon changed back; trying again in ten minutes.`);
+  },
   // Select the member and cast at them; a skill without a target is simply cast.
   cast(id, member, why) {
     const s = World.skill(id), t = now();
@@ -8803,8 +8857,10 @@ const Support = {
       const low = living.filter(m => m.hpPct < c.heal.pct).sort((a, b) => a.hpPct - b.hpPct)[0];
       if (low) return this.cast(healId, low, `heal ${low.self ? 'myself' : low.name} (${Math.round(low.hpPct)}%)`);
     }
-    // 3. Buffs a member does not have yet. A cast that never shows on the member counts as a miss.
+    // 3. Buffs a member does not have yet. A cast that never shows on the member counts as a miss. A buff that needs
+    // other gear (the weapon its skill needs, or the gear chosen for it) is cast in a weapon swap that comes back after.
     const t = now();
+    let note = '';
     for (const b of c.buffs) {
       const id = this.skillOf(b);
       if (!id || !this.ready(id)) continue;
@@ -8822,11 +8878,20 @@ const Support = {
           this.misses.set(key, miss);
           if (t < miss.until) continue;
         }
+        const gear = BuffGear.forParty(b, id);
+        if (typeof gear === 'string') { note = gear; break; }
+        if (gear) {
+          const entry = { party: true, id, due: () => this.wants(b, m.name), cast: () => this.castBuff(b, m.name), shows: () => this.shows(b, m.name), ended: () => this.ended(b, m.name) };
+          if (BuffGear.startParty(gear, entry)) { this.message = `${World.skillName(id)} on ${m.name}: changing weapons.`; return true; }
+          // Not now (fighting, a window open): the other buffs, which need no swap, still go out.
+          note = BuffGear.waiting || `${World.skillName(id)} on ${m.name}: waiting to change weapons.`;
+          break;
+        }
         if (this.cast(id, m, `${World.skillName(id)} on ${m.name}`)) { this.sent.set(key, t); return true; }
         return false;
       }
     }
-    this.message = party.some(m => m.alive && !m.inRange) ? 'Some party members are out of view or out of range.' : 'Party is healed and buffed.';
+    this.message = note || (party.some(m => m.alive && !m.inRange) ? 'Some party members are out of view or out of range.' : 'Party is healed and buffed.');
     return false;
   },
 };
@@ -15513,8 +15578,11 @@ const UI = {
         const remove = this.button('×', () => { chosen().splice(i, 1); Settings.saveProfile(); this.draw(); });
         remove.className = 'mini'; remove.setAttribute('aria-label', 'Delete party buff ' + World.skillName(id));
         const row = el('div', null, 'skill-row'); row.append(this.skillSlot(id, () => {}, World.skillName(id)), info, remove);
-        buffs.append(row, this.text('Only these members: ' + World.skillName(id), () => b.only || '', v => b.only = v, 'everyone (or names, comma-separated)'));
+        buffs.append(row, this.text('Only these members: ' + World.skillName(id), () => b.only || '', v => b.only = v, 'everyone (or names, comma-separated)'),
+          this.select('Gear for ' + World.skillName(id), [[0, 'Automatic: the weapon the skill needs'], ['primary', 'Primary weapon'], ['secondary', 'Secondary weapon'], ['shield', 'Shield (with a one-handed weapon)']],
+            () => b.gear || 0, v => b.gear = BUFF_GEAR_KINDS.includes(v) ? v : 0));
       });
+      if (chosen().length) buffs.append(el('p', 'With Swap weapons for buffs on (Combat → Buffs & imbue), a party buff that needs another weapon, or the gear picked for it, is cast after changing weapons; then your primary weapon (or what you wore) comes back. Automatic also needs Wear the weapon each buff needs.', 'muted'));
       const grid = el('div', null, 'grid'); grid.setAttribute('aria-label', 'Party buff skill icons');
       for (const s of Support.friendlySkills()) {
         const group = s.group ?? s.id, selected = chosen().some(b => b.group === group);

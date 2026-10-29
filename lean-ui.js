@@ -978,8 +978,11 @@ const UI = {
         const remove = this.button('×', () => { chosen().splice(i, 1); Settings.saveProfile(); this.draw(); });
         remove.className = 'mini'; remove.setAttribute('aria-label', 'Delete party buff ' + World.skillName(id));
         const row = el('div', null, 'skill-row'); row.append(this.skillSlot(id, () => {}, World.skillName(id)), info, remove);
-        buffs.append(row, this.text('Only these members: ' + World.skillName(id), () => b.only || '', v => b.only = v, 'everyone (or names, comma-separated)'));
+        buffs.append(row, this.text('Only these members: ' + World.skillName(id), () => b.only || '', v => b.only = v, 'everyone (or names, comma-separated)'),
+          this.select('Gear for ' + World.skillName(id), [[0, 'Automatic: the weapon the skill needs'], ['primary', 'Primary weapon'], ['secondary', 'Secondary weapon'], ['shield', 'Shield (with a one-handed weapon)']],
+            () => b.gear || 0, v => b.gear = BUFF_GEAR_KINDS.includes(v) ? v : 0));
       });
+      if (chosen().length) buffs.append(el('p', 'With Swap weapons for buffs on (Combat → Buffs & imbue), a party buff that needs another weapon, or the gear picked for it, is cast after changing weapons; then your primary weapon (or what you wore) comes back. Automatic also needs Wear the weapon each buff needs.', 'muted'));
       const grid = el('div', null, 'grid'); grid.setAttribute('aria-label', 'Party buff skill icons');
       for (const s of Support.friendlySkills()) {
         const group = s.group ?? s.id, selected = chosen().some(b => b.group === group);
