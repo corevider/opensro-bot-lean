@@ -5383,6 +5383,88 @@ test('buff gear carries on when the game refuses a picked weapon, and restores g
   assert.equal(JSON.stringify(f.BuffGear.setup()),home);
   assert.match(f.BuffGear.message,/would not equip/);
 });
+test('the primary weapon is the combat gear: worn while hunting, with the shield when it is one-handed', () => {
+  const f = buffGearFixture(), gp = f.World.gp, at = s => gp.inventory.find(i => i.slot === s)?.refObjId;
+  const key = s => f.BuffGear.key(gp.inventory.find(i => i.slot === s));
+  f.Settings.profile.macro.buffs = [];
+  assert.equal(f.BuffGear.tick(), false, 'without a primary weapon what is worn stays');
+  f.ItemRules.setGear('primaryWeapon', key(13)); f.ItemRules.setGear('shield', key(14));
+  assert.equal(f.BuffGear.tick(), true, 'something else is worn'); f.drive();
+  assert.deepEqual([at(6), at(7)], [200, 201], 'the one-handed primary with the chosen shield');
+  assert.equal(f.Hunt.running, true);
+  let n = f.commands.length; f.BuffGear.tick(); assert.equal(f.commands.length, n, 'nothing more to wear');
+  f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 300)));
+  assert.equal(f.BuffGear.tick(), true); f.drive();
+  assert.deepEqual([at(6), at(7)], [300, undefined], 'a two-handed primary goes on without the shield');
+  f.Settings.profile.macro.buffSwap = false; f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 100)));
+  assert.equal(f.BuffGear.tick(), true, 'also with buff swapping off'); f.drive();
+  assert.equal(at(6), 100);
+  f.Hunt.running = false; f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 300)));
+  n = f.commands.length; assert.equal(f.BuffGear.tick(), false, 'only while hunting'); assert.equal(f.commands.length, n);
+});
+test('a primary weapon the game refuses is left alone without stopping hunting', () => {
+  const f = buffGearFixture(), gp = f.World.gp;
+  f.Settings.profile.macro.buffs = []; gp.inventory = gp.inventory.filter(i => i.slot !== 7);
+  const harp = f.BuffGear.key(gp.inventory.find(i => i.slot === 15));
+  f.ItemRules.setGear('primaryWeapon', harp);
+  f.BuffGear.tick(); f.BuffGear.tick();
+  assert.equal(f.BuffGear.run.pending.source, 15, 'the primary is sent to the weapon slot');
+  for (let n = 0; n < 20 && f.BuffGear.run; n++) { f.advance(300); f.BuffGear.tick(); }
+  assert.equal(f.BuffGear.run, null); assert.equal(f.Hunt.running, true, 'hunting goes on');
+  assert.match(f.BuffGear.message, /would not equip .*until you pick it again/);
+  assert.equal(f.BuffGear.bad.has(harp), true); assert.equal(f.BuffGear.combat(), null, 'what is worn is the combat gear again');
+  const n = f.commands.length; f.advance(1000); f.BuffGear.tick(); assert.equal(f.commands.length, n, 'no retry');
+});
+test('a chosen shield the game refuses is skipped and the shield worn before goes back on', () => {
+  const f = buffGearFixture(), gp = f.World.gp, at = s => gp.inventory.find(i => i.slot === s)?.refObjId;
+  const key = s => f.BuffGear.key(gp.inventory.find(i => i.slot === s)), refusedShield = key(14);
+  f.Settings.profile.macro.buffs = [];
+  f.ItemRules.setGear('primaryWeapon', key(13)); f.ItemRules.setGear('shield', refusedShield);
+  f.BuffGear.tick();
+  for (let n = 0; n < 60 && f.BuffGear.run; n++) {
+    f.BuffGear.tick();
+    const p = f.BuffGear.run?.pending;
+    if (p && !(p.destination === 7 && p.from === refusedShield)) f.confirmMove(); else f.advance(300);
+  }
+  assert.equal(f.BuffGear.run, null); assert.equal(f.Hunt.running, true, 'hunting goes on');
+  assert.deepEqual([at(6), at(7)], [200, 101], 'the primary with the shield worn before, not an empty off-hand');
+  assert.equal(f.BuffGear.bad.has(refusedShield), true); assert.match(f.BuffGear.message, /would not equip/);
+  const n = f.commands.length; f.advance(1000); f.BuffGear.tick(); assert.equal(f.commands.length, n, 'settled: nothing more to wear');
+});
+test('a buff assigned to the secondary weapon or the shield wears it, then the primary comes back', () => {
+  const f = buffGearFixture(), gp = f.World.gp, at = s => gp.inventory.find(i => i.slot === s)?.refObjId;
+  const key = s => f.BuffGear.key(gp.inventory.find(i => i.slot === s));
+  f.ItemRules.setGear('primaryWeapon', key(13)); f.ItemRules.setGear('secondaryWeapon', key(15)); f.ItemRules.setGear('shield', key(14));
+  f.Settings.profile.macro.buffs = [{ id: 30, group: 30, gearSet: 'secondary', enabled: true, mode: 'hunt' }];
+  const casts = [], cast = f.Combat.cast.bind(f.Combat);
+  f.Combat.cast = (id, ...a) => { casts.push([id, at(6), at(7)]); return cast(id, ...a); };
+  assert.equal(f.BuffGear.tick(), true); f.drive();
+  assert.deepEqual(casts, [[30, 300, undefined]], 'cast with the secondary harp');
+  assert.deepEqual([at(6), at(7)], [200, 201], 'then the primary staff and the shield, not what was worn before');
+  assert.match(f.BuffGear.status(), /Bard buff: active/);
+  f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 300)));
+  f.ItemRules.setGear('secondaryWeapon', f.BuffGear.key(gp.inventory.find(i => i.refObjId === 200)));
+  f.drive();
+  assert.deepEqual([at(6), at(7)], [300, undefined]);
+  f.Settings.profile.macro.buffs = [{ id: 20, group: 20, gearSet: 'shield', enabled: true, mode: 'hunt' }]; casts.length = 0;
+  assert.equal(f.BuffGear.tick(), true); f.drive();
+  assert.deepEqual(casts, [[20, 200, 201]], 'the shield goes on with the one-handed secondary');
+  assert.deepEqual([at(6), at(7)], [300, undefined], 'and comes off with the two-handed primary');
+  f.ItemRules.setGear('shield', null); f.Settings.profile.macro.buffs[0].gearSet = 'shield'; f.Combat.buffCastAt.clear(); gp.buffSlots = [];
+  assert.equal(f.BuffGear.tick(), false); assert.match(f.BuffGear.waiting, /Choose a shield under Combat/);
+});
+test('automatic buff swaps try the secondary weapon, then the primary, then the highest plus', () => {
+  const f = autoGearFixture(), gp = f.World.gp;
+  const harp = gp.inventory.find(i => i.slot === 15), better = { ...harp, slot: 16, plus: 5 }, other = { ...harp, slot: 17, plus: 3 };
+  gp.inventory.push(better, other);
+  assert.equal(f.BuffGear.pick([14]).slot, 16, 'the highest plus without a choice');
+  f.ItemRules.setGear('primaryWeapon', f.BuffGear.key(other)); assert.equal(f.BuffGear.pick([14]).slot, 17, 'the primary');
+  f.ItemRules.setGear('secondaryWeapon', f.BuffGear.key(harp)); assert.equal(f.BuffGear.pick([14]).slot, 15, 'the secondary first');
+});
+test('a share keeps buffs assigned to the primary or secondary weapon or the shield', () => {
+  const f = shareFixture(); f.Settings.profile.macro.buffs = [{ id: 20, group: 20, gearSet: 'secondary', enabled: true }];
+  assert.equal(JSON.parse(f.ProfileShare.text(true)).profile.macro.buffs[0].gearSet, 'secondary');
+});
 test('buff gear failure names the move that was not confirmed',()=>{
   const f=buffGearFixture(); f.BuffGear.tick(); f.BuffGear.tick();
   f.World.gp.inventoryPending=true;

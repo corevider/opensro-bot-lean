@@ -483,8 +483,9 @@ const UI = {
       up.setAttribute('aria-label', 'Move up ' + World.skillName(id)); down.setAttribute('aria-label', 'Move down ' + World.skillName(id)); remove.setAttribute('aria-label', 'Delete ' + World.skillName(id));
       row.append(this.skillSlot(id, () => {}, World.skillName(id)), info, up, down, remove); parent.append(row);
       if (buff) parent.append(this.select('Gear for ' + World.skillName(id),
-        () => [[0, BuffGear.auto() ? 'Automatic: the weapon the skill needs' : 'Current combat gear'], ...Settings.profile.macro.buffSets.map(s => [s.id, s.name])],
-        () => entry.gearSet || 0, value => entry.gearSet = Number(value)));
+        () => [[0, BuffGear.auto() ? 'Automatic: the weapon the skill needs' : 'Current combat gear'], ['primary', 'Primary weapon'], ['secondary', 'Secondary weapon'],
+          ['shield', 'Shield (with a one-handed weapon)'], ...Settings.profile.macro.buffSets.map(s => [s.id, s.name])],
+        () => entry.gearSet || 0, value => entry.gearSet = BUFF_GEAR_KINDS.includes(value) ? value : Number(value)));
     });
     const search = el('input'); search.type = 'search'; search.placeholder = 'Find a skill…'; search.setAttribute('aria-label', buff ? 'Search buff skills' : 'Search attack skills');
     const title = el('div', null, 'picker-title'); title.append(el('span', buff ? 'Learned self buffs' : 'Learned attack skills'), search);
@@ -753,7 +754,8 @@ const UI = {
     const pick = (title, slot) => this.select(title, () => ItemRules.gearOptions(slot), () => ItemRules.cfg().gear?.[slot] || '', v => ItemRules.setGear(slot, v));
     host.append(this.group('Weapons and shield',
       pick('Primary weapon', 'primaryWeapon'), pick('Secondary weapon', 'secondaryWeapon'), pick('Shield', 'shield'),
-      el('p', 'Pick from what you wear or carry. The choice stays when you wear the item and when alchemy changes its plus or stones. Chosen gear is never sold, stored, dropped or moved to the pet, even with an item rule, and buff swaps wear the secondary weapon first.', 'muted')));
+      el('p', 'Pick from what you wear or carry. The choice stays when you wear the item and when alchemy changes its plus or stones. Chosen gear is never sold, stored, dropped or moved to the pet, even with an item rule.', 'muted'),
+      el('p', 'While hunting, the primary weapon is your combat weapon: it is put back on after buff swaps and reconnects, with the shield when it is one-handed. A buff can wear the primary or secondary weapon or the shield (Gear for <skill> below), and automatic swaps try the secondary weapon first.', 'muted')));
   },
   section_combatBuffs(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();

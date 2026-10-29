@@ -17,8 +17,9 @@ const ProfileShare = {
     const r = p.potion.restock, t = r.town;
     p.hunt.center = own.center; r.vendor = own.vendor; r.route = own.route; r.offers = own.offers;
     Object.assign(t, own.town); p.macro.buffSets = own.buffSets; p.items.gear = own.gear; p.wardrobe = own.wardrobe; p.trace.name = own.follow; p.lure.points = own.pullPoints;
-    // A buff assigned to a weapon set means nothing without the sets.
-    for (const b of p.macro.buffs) if (b && !p.macro.buffSets.some(s => s.id === Number(b.gearSet))) b.gearSet = 0;
+    // A buff assigned to a weapon set means nothing without the sets; one assigned to the primary or secondary weapon or
+    // the shield uses the importer's own.
+    for (const b of p.macro.buffs) if (b && !BUFF_GEAR_KINDS.includes(b.gearSet) && !p.macro.buffSets.some(s => s.id === Number(b.gearSet))) b.gearSet = 0;
     return p;
   },
   strip(p) {

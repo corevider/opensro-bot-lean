@@ -1,6 +1,9 @@
 // Confirm every native inventory move before casting or restoring combat gear.
+// A buff's gear choice: a saved set's id, 0 for the automatic choice, or one of the weapons and shield chosen under Combat.
+const BUFF_GEAR_KINDS = ['primary', 'secondary', 'shield'];
+const BUFF_COMBAT_HOLD_MS = 5 * 60000;
 const BuffGear = {
-  run: null, recovery: null, autoRestore: false, message: 'Buff weapon swapping off.', skipped: new Map(), waiting: '', started: false, bad: new Set(),
+  run: null, recovery: null, autoRestore: false, message: 'Buff weapon swapping off.', skipped: new Map(), waiting: '', started: false, bad: new Set(), combatHold: 0,
   cfg() { return Settings.profile.macro; },
   items() { return World.gp?.inventory || []; },
   at(slot) { return this.items().find(i => i.slot === slot) || null; },
@@ -58,12 +61,40 @@ const BuffGear = {
     const gp = World.gp, level = gp?.progression?.level;
     const list = this.items().filter(i => i.slot >= (gp.equipmentSlotCount || 13) && this.weapon(i) && kinds.includes(this.kind(i)) &&
       (i.durability ?? 1) > 0 && !this.bad.has(this.key(i)) && !(level >= 0 && Town.requiredLevel(i) > level));
-    // A weapon chosen under Combat comes first, then the highest plus.
-    const chosen = i => ItemRules.guarded(i) ? 1 : 0;
+    // The secondary weapon chosen under Combat comes first, then the primary, then the highest plus.
+    const g = ItemRules.cfg().gear || {}, chosen = i => { const k = this.key(i); return k === g.secondaryWeapon ? 2 : k === g.primaryWeapon ? 1 : 0; };
     list.sort((a, b) => chosen(b) - chosen(a) || (b.plus ?? 0) - (a.plus ?? 0) || a.slot - b.slot);
     return list[0] || null;
   },
   setup() { return { weapon: this.key(this.at(6)), shield: this.key(this.at(7)), auto: true }; },
+  // The chosen shield when it is carried and the game has not refused it.
+  chosenShield() { const k = ItemRules.cfg().gear?.shield; return this.shield(this.findAny(k)) && !this.bad.has(k) ? k : null; },
+  // The combat gear: the primary weapon chosen under Combat, with the chosen shield when it is one-handed (or the worn
+  // shield without one) and the worn arrows or bolts when it is two-handed. Null without a usable primary weapon.
+  combat() {
+    const k = ItemRules.cfg().gear?.primaryWeapon, weapon = this.findAny(k), off = this.at(7);
+    if (!this.weapon(weapon) || this.bad.has(k)) return null;
+    const shield = this.oneHanded(this.kind(weapon)) ? this.chosenShield() || (this.shield(off) ? this.key(off) : null) : off && !this.shield(off) ? this.key(off) : null;
+    return { id: 'gear:primary', name: 'your primary weapon', auto: true, primary: true, weapon: k, shield };
+  },
+  // What the character goes back to after buffs: the combat gear, or what is worn when no primary weapon is chosen.
+  home() { return this.combat() || this.setup(); },
+  // The home gear, or the primary weapon's set built at another moment: its off-hand may hold arrows or bolts.
+  homeLike(set, home) { return set === home || !!(set.primary && home?.primary); },
+  // The gear a buff assigned to the primary weapon, the secondary weapon or the shield wears, or why there is none.
+  gearFor(kind, home) {
+    const g = ItemRules.cfg().gear || {};
+    if (kind === 'primary') return home.primary ? home : g.primaryWeapon ? 'Your primary weapon is not carried, or the game would not equip it.' : 'Choose a primary weapon under Combat and carry it.';
+    if (kind === 'secondary') {
+      const weapon = this.findAny(g.secondaryWeapon);
+      if (!this.weapon(weapon)) return 'Choose a secondary weapon under Combat and carry it.';
+      return { id: 'gear:secondary', name: 'your secondary weapon', auto: true, weapon: g.secondaryWeapon, shield: this.oneHanded(this.kind(weapon)) ? this.chosenShield() : null };
+    }
+    if (!this.chosenShield()) return 'Choose a shield under Combat and carry it.';
+    const weapon = [this.findAny(g.primaryWeapon), this.findAny(g.secondaryWeapon), this.at(6)].find(w => this.weapon(w) && this.oneHanded(this.kind(w)));
+    if (!weapon) return 'A shield needs a one-handed primary or secondary weapon.';
+    return { id: 'gear:shield', name: 'your shield', auto: true, weapon: this.key(weapon), shield: g.shield };
+  },
   matches(set) { return set.weapon === this.key(this.at(6)) && set.shield === this.key(this.at(7)); },
   signature() { return JSON.stringify([this.cfg().buffSwap, this.cfg().buffAuto, this.cfg().buffSets, this.cfg().buffs]); },
   init() {
@@ -88,7 +119,7 @@ const BuffGear = {
     Settings.saveProfile(); UI.draw();
   },
   reset() {
-    this.run = this.recovery = null; this.skipped.clear(); this.bad.clear();
+    this.run = this.recovery = null; this.skipped.clear(); this.bad.clear(); this.combatHold = 0;
     this.message = 'Buff gear reset. Check equipped weapons after reconnecting.';
   },
   // Dying or changing world mid-swap is not a failure: remember the combat gear and put it back on once alive again.
@@ -122,7 +153,7 @@ const BuffGear = {
     this.run = this.create(this.recovery, []); this.run.restoring = true; this.recovery = null; this.autoRestore = false;
   },
   create(home, queue) {
-    return { home, queue, restoring: false, pending: null, cast: null, effects: [],
+    return { home, worn: this.setup(), queue, restoring: false, pending: null, cast: null, effects: [],
       at: now(), manualAt: Manual.lastAt, character: World.charName, profile: Settings.profile, signature: this.signature() };
   },
   due(b, auto) {
@@ -137,21 +168,27 @@ const BuffGear = {
     return now() - (Combat.buffCastAt.get(b.group) ?? -Infinity) >= gap ? id : 0;
   },
   begin() {
-    if (!this.cfg().buffSwap || this.recovery || !Hunt.running || !World.inWorld() || World.isDead() ||
+    if (this.recovery || !Hunt.running || !World.inWorld() || World.isDead() ||
         Combat.busy() || World.isSitting() || World.local()?.mountedOn || World.gp?.inventoryPending ||
         World.gp?.pendingMoves || World.gp?.returnScroll || now() - Manual.lastAt < Hunt.cfg().manualPauseS * 1000 ||
         Town.trip || WalkBack.active || Restock.trip || Restock.recording || Resurrect.trip || now() < Resurrect.holdUntil ||
         Restock.activeShop() || World.gp?.storage || World.gp?.exchange?.open || World.gp?.exchange?.requesting || World.gp?.stall?.phase && World.gp.stall.phase !== 'none' ||
         Alchemy.run || Alchemy.pending || Loot.active && !Loot.active.petGid || Loot.pressed()) return false;
-    const queue = [];
-    for (const set of this.cfg().buffSets) {
+    const queue = [], swap = this.cfg().buffSwap, home = this.home();
+    let note = '';
+    if (swap) for (const set of this.cfg().buffSets) {
       const buffs = this.cfg().buffs.filter(b => Number(b.gearSet) === set.id).map(b => ({ b, id: this.due(b) })).filter(b => b.id);
       if (buffs.length) queue.push({ set, buffs });
     }
+    // Buffs assigned to the primary or secondary weapon or the shield chosen under Combat.
+    if (swap) for (const kind of BUFF_GEAR_KINDS) {
+      const buffs = this.cfg().buffs.filter(b => b.gearSet === kind).map(b => ({ b, id: this.due(b) })).filter(b => b.id);
+      if (!buffs.length) continue;
+      const set = this.gearFor(kind, home);
+      if (typeof set === 'string') note = set; else queue.push({ set, buffs });
+    }
     // Buffs without an assigned set wear whichever bag weapon their skill requires; buffs sharing a weapon share one swap.
     const wait = text => { this.waiting = text; return false; };
-    const home = this.setup();
-    let note = '';
     if (this.auto()) {
       const byWeapon = new Map();
       for (const b of this.cfg().buffs) {
@@ -177,14 +214,14 @@ const BuffGear = {
       }
       queue.push(...byWeapon.values());
     }
-    if (!queue.length) { this.waiting = note; return false; }
+    if (!queue.length) { this.waiting = note; return this.wearCombat(home); }
     // A buff is due, so say why the swap cannot start instead of waiting silently.
-    if (!this.weapon(this.at(6))) return wait('Equip your combat weapon before hunting.');
+    if (!home.primary && !this.weapon(this.at(6))) return wait('Equip your combat weapon before hunting.');
     for (const set of [home, ...queue.map(q => q.set)]) {
       const name = set === home ? 'your combat gear' : set.auto ? set.name : 'the saved set "' + set.name + '"';
       if (!this.lookup(set, set.weapon)) return wait(`Cannot find ${name}: its weapon is not in your bag or equipped (or two copies look identical). Save the buff set again.`);
       if (!this.weapon(this.lookup(set, set.weapon))) return wait(`${name} is not a weapon any more. Save the buff set again.`);
-      if (set.shield && (!this.lookup(set, set.shield) || set !== home && !this.shield(this.lookup(set, set.shield)))) return wait(`Cannot find the shield of ${name} (or two copies look identical). Save the buff set again.`);
+      if (set.shield && (!this.lookup(set, set.shield) || !this.homeLike(set, home) && !this.shield(this.lookup(set, set.shield)))) return wait(`Cannot find the shield of ${name} (or two copies look identical). Save the buff set again.`);
     }
     // A weapon swaps places with its bag copy, so it needs no space. Only taking the off-hand item off (shield, arrows) needs one free bag slot.
     let offhand = this.key(this.at(7)), stash = false;
@@ -194,6 +231,16 @@ const BuffGear = {
     if (!Cmd.move(World.pose())) return false;
     Loot.suspend(); Hunt.state = 'buff'; this.run = this.create(home, queue);
     this.message = 'Pausing combat for buff gear.';
+    return true;
+  },
+  // While hunting with a primary weapon chosen, put the combat gear back on when something else is worn (after a
+  // reconnect or a manual change): the primary weapon, and with a one-handed one the shield.
+  wearCombat(home) {
+    if (!home.primary || this.matches(home) || now() < this.combatHold) return false;
+    if (this.at(7) && this.key(this.at(7)) !== home.shield && World.freeBagSlots() < 1) { this.waiting = 'Wearing your combat gear needs one free bag slot to take off the off-hand item.'; return false; }
+    if (!Cmd.move(World.pose())) return false;
+    Loot.suspend(); Hunt.state = 'buff'; this.run = this.create(home, []); this.run.restoring = true; this.run.combat = true;
+    this.message = 'Wearing your combat gear.';
     return true;
   },
   move(source, destination) {
@@ -206,7 +253,7 @@ const BuffGear = {
   equip(set) {
     if (this.matches(set)) return true;
     const weapon = this.lookup(set, set.weapon), shield = this.lookup(set, set.shield);
-    if (!weapon || !this.weapon(weapon) || set.shield && (!shield || set !== this.run.home && !this.shield(shield))) { this.fail('Required equipment missing or ambiguous.'); return false; }
+    if (!weapon || !this.weapon(weapon) || set.shield && (!shield || !this.homeLike(set, this.run.home) && !this.shield(shield))) { this.fail('Required equipment missing or ambiguous.'); return false; }
     if (this.at(7) && this.key(this.at(7)) !== set.shield) {
       const gp = World.gp;
       let empty = -1;
@@ -233,7 +280,24 @@ const BuffGear = {
         const item = this.at(p.source) || this.at(p.destination), what = item ? item.name || Items.name(item.refObjId) : 'an item';
         // Nothing moved and nothing is pending: the game refused it (level, class). Skip that weapon, put gear back, carry on.
         const refused = !gp.inventoryPending && now() - p.at > 2000 && this.key(this.at(p.source)) === p.from && this.key(this.at(p.destination)) === p.to;
-        if (refused && !r.restoring && r.queue[0]?.set.auto && p.destination === 6) {
+        // The chosen primary weapon or shield the game will not equip: never try it again (until it is picked again),
+        // and put back what was worn before, including an off-hand item already taken off.
+        const chosen = p.destination === 6 && p.from === r.home.weapon || p.destination === 7 && p.from === r.home.shield;
+        if (refused && r.restoring && r.home.primary && chosen) {
+          this.bad.add(p.from); r.pending = null;
+          // A refused shield: the primary stays, with the shield worn before if there was one. A refused primary: what was worn.
+          r.home = p.destination === 7 ? { ...r.home, shield: this.shield(this.findAny(r.worn.shield)) ? r.worn.shield : null } : r.worn;
+          if (r.combat) { r.combat = false; this.combatHold = now() + BUFF_COMBAT_HOLD_MS; }
+          r.refused = `The game would not equip ${what}; it is not tried again until you pick it again.`; this.message = r.refused;
+          Log.warn(this.message); return true;
+        }
+        // Any other combat gear change the game does not take is left alone for five minutes instead of stopping hunting.
+        if (r.combat && (refused || now() - p.at > 15000)) {
+          this.combatHold = now() + BUFF_COMBAT_HOLD_MS; this.run = null;
+          this.message = `The game would not move ${what}; your combat gear stays as it is for five minutes.`;
+          Log.warn(this.message); return true;
+        }
+        if (refused && !r.restoring && r.queue[0]?.set.auto && (p.destination === 6 || p.destination === 7 && p.from === r.queue[0].set.shield)) {
           this.bad.add(p.from); r.pending = null; r.queue.shift();
           r.refused = `The game would not equip ${what}; another weapon is tried next time.`; this.message = r.refused + ' Restoring combat gear.';
           return true;
@@ -279,9 +343,10 @@ const BuffGear = {
     }
     return true;
   },
-  // The buffs assigned to a saved set that are on, with how long each has left.
+  // The buffs assigned to a saved set or to the gear chosen under Combat that are on, with how long each has left.
   assigned() {
-    return this.cfg().buffs.filter(b => b.enabled && Number(b.gearSet) && this.cfg().buffSets.some(s => s.id === Number(b.gearSet))).map(b => {
+    const sets = this.cfg().buffSets;
+    return this.cfg().buffs.filter(b => b.enabled && (BUFF_GEAR_KINDS.includes(b.gearSet) || Number(b.gearSet) && sets.some(s => s.id === Number(b.gearSet)))).map(b => {
       const id = Combat.resolve(b);
       return { name: World.skillName(id || b.id), left: id ? World.buffRemaining(id) : 0, learned: !!id && World.learned(id), skip: this.skipped.get(b.group) };
     });
@@ -298,7 +363,7 @@ const BuffGear = {
     if (this.run || this.recovery) return this.message;
     if (!this.cfg().buffSwap) return 'Buff weapon swapping off.';
     const sets = this.cfg().buffSets, list = this.assigned(), auto = this.autoList();
-    if (!auto.length && !sets.length) return 'Buff weapon swapping is on, but no buff set is saved yet. Equip the buff weapon and press Save equipped buff set.' + (this.cfg().buffAuto ? ' Buffs that need a different weapon than yours are swapped automatically; none do right now.' : '');
+    if (!auto.length && !list.length && !sets.length) return 'Buff weapon swapping is on, but no buff set is saved yet. Equip the buff weapon and press Save equipped buff set, or pick your primary or secondary weapon or shield in Gear for <skill>.' + (this.cfg().buffAuto ? ' Buffs that need a different weapon than yours are swapped automatically; none do right now.' : '');
     if (!auto.length && !list.length) return 'Buff weapon swapping is on, but no buff skill is assigned to a set yet. Use Gear for <skill> under your buffs.';
     const lines = [];
     for (const a of auto) {
@@ -319,7 +384,7 @@ const BuffGear = {
     const box = UI.group('Buff weapon sets');
     box.append(UI.check('Swap weapons for buffs', () => this.cfg().buffSwap, v => this.cfg().buffSwap = v),
       UI.check('Wear the weapon each buff needs (from your bag)', () => this.cfg().buffAuto, v => this.cfg().buffAuto = v),
-      el('p', 'With both on, a buff your weapon cannot cast is cast with a matching weapon from your bag, then your combat weapon and shield come back. Saved sets below are only for buffs you assign to one. Keep one bag slot free. Buffs tied to the removed weapon may end.', 'muted'));
+      el('p', 'With both on, a buff your weapon cannot cast is cast with a matching weapon from your bag, then your combat weapon and shield come back. A buff can also wear the primary or secondary weapon or the shield chosen above, or a saved set below. Keep one bag slot free. Buffs tied to the removed weapon may end.', 'muted'));
     const name = el('input'); name.type = 'text'; name.maxLength = 40; name.value = 'Buff set ' + (this.cfg().buffSets.length + 1);
     box.append(UI.field('New buff set name', name), UI.button('Save equipped buff set', () => this.save(name.value)));
     for (const set of this.cfg().buffSets) {
