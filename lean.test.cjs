@@ -2789,6 +2789,8 @@ test('pet auto potion heals a low attack or pickup pet with the smallest kit tha
   g.Controller.tick(); assert.equal(petUses(g)[0].slot, 22, 'very low HP takes the biggest kit when none covers it exactly');
   g = petPotionFixture(); g.World.applyGameplay({ ...g.World.gp, cosRecords: [{ gid: 51, refObjId: 500, band: 4, hp: 300, status: 5, dead: false }] });
   g.Controller.tick(); assert.equal(petUses(g)[0].companionGid, 51, 'pickup pets are healed too');
+  g = petPotionFixture({ progression: { gold: '100000', level: 100, stats: { maxHp: 100, maxMp: 100, strength: 300 } } });
+  g.Controller.tick(); assert.equal(petUses(g)[0].slot, 20, 'the small kit already covers the deficit once its heal is scaled by strength and level like the server does');
 });
 test('pet auto potion never touches the wrong pets, the player potions or an unconfirmed retry', () => {
   let f = petPotionFixture(); f.World.applyGameplay({ ...f.World.gp, cosRecords: [{ gid: 60, refObjId: 500, band: 2, hp: 100, status: 5, dead: false }, { gid: 61, refObjId: 500, band: 3, hp: 100, status: 5, dead: true }] });
