@@ -2918,7 +2918,7 @@ test('hgp potions are a restock supply bought at the merchant and skipped, not f
   const offer = (ref, tf) => ({ refObjId: ref, name: 'Pet food', tab: 0, slot: 0, maxStack: 100, price: '10', previews: [{ refObjId: ref, typeFlags: tf }] });
   const hgpTf = (9 << 11) | 236;
   assert.equal(f.Restock.offerKind(offer(3001, hgpTf)), 'hgp', 'companion food is its own shop kind');
-  assert.equal(f.Restock.offerKind(offer(2143, (4 << 11) | 236)), '', 'recovery kits are never a shop supply');
+  assert.equal(f.Restock.offerKind(offer(2145, (5 << 11) | 236)), '', 'pet MP potions are no shop supply');
   r.hgp.on = true; r.hgp.refObjId = 3001; r.hgp.low = 5; r.hgp.target = 40;
   assert.deepEqual(JSON.parse(JSON.stringify(c.supplies().map(s => [s.kind, s.refObjId]))), [['mp', 15], ['hgp', 3001]], 'the pet food rides the same refill trips');
   c.begin(); c.enter('buy');
@@ -2937,6 +2937,25 @@ test('hgp potions are a restock supply bought at the merchant and skipped, not f
   const h = townFixture(); h.Restock.cfg().hgp.on = true; h.Town.cfg().petFull = false; h.World.gp.inventory = h.World.gp.inventory.map(i => i.refObjId === 15 ? { ...i, quantity: 50 } : i);
   assert.ok(!h.Town.supplies().some(s => s.kind === 'hgp'), 'an unchosen pet food never rides the trips');
   assert.equal(h.Town.reason(), '', 'and never blocks or triggers restock on its own');
+});
+test('pet recovery kits are a restock supply bought at the merchant and skipped, not fatal, when not sold', () => {
+  const f = townFixture(), r = f.Restock.cfg(), c = f.Town;
+  assert.equal(fixture().Restock.cfg().kit.on, false); assert.equal(fixture().Restock.cfg().kit.refObjId, 0);
+  const offer = (ref, tf) => ({ refObjId: ref, name: 'Recovery kit', tab: 0, slot: 0, maxStack: 100, price: '10', previews: [{ refObjId: ref, typeFlags: tf }] });
+  const kitTf = (4 << 11) | 236;
+  assert.equal(f.Restock.offerKind(offer(2143, kitTf)), 'kit', 'companion kits are their own shop kind');
+  r.kit.on = true; r.kit.refObjId = 2143; r.kit.low = 5; r.kit.target = 40;
+  assert.deepEqual(JSON.parse(JSON.stringify(c.supplies().map(s => [s.kind, s.refObjId]))), [['mp', 15], ['kit', 2143]], 'the kits ride the same refill trips');
+  c.begin(); c.enter('buy');
+  const gp = f.World.gp; gp.target = 61; gp.targetCapabilities = 1;
+  gp.shop = { npc: 61, offers: [offer(15, 4332), offer(2143, kitTf)] }; gp.inventory = gp.inventory.map(i => i.refObjId === 15 ? { ...i, quantity: 50 } : i);
+  c.tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.commands.at(-1))), { kind: 'shop-buy', tab: 0, slot: 0, quantity: 40 }, 'the kit is bought like a potion');
+  const g = townFixture(); g.Restock.cfg().kit.on = true; g.Restock.cfg().kit.refObjId = 2143;
+  g.Town.begin(); g.Town.enter('buy'); g.World.gp.target = 61; g.World.gp.targetCapabilities = 1;
+  g.World.gp.shop = { npc: 61, offers: [offer(15, 4332)] }; g.World.gp.inventory = g.World.gp.inventory.map(i => i.refObjId === 15 ? { ...i, quantity: 50 } : i);
+  g.Town.tick(); assert.match(g.Town.message, /does not sell pet recovery kits/);
+  g.Town.tick(); assert.ok(g.Town.trip && g.Town.trip.phase !== 'buy', 'a merchant without kits skips them and the trip goes on');
 });
 function reconnectFixture() {
   const f = fixture(), sent = []; f.World.charName = 'Tester'; f.Hunt.start();

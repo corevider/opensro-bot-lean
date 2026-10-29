@@ -851,7 +851,12 @@ const UI = {
         this.select('HGP potion', () => [[0, 'Choose the merchant\'s pet food'], ...C().offers.filter(o => o.kind === 'hgp').map(o => [o.refObjId, o.name])], () => C().hgp.refObjId, v => C().hgp.refObjId = Number(v)),
         this.number('HGP low stock ≤', () => C().hgp.low, v => C().hgp.low = v, 0, 9999),
         this.number('HGP refill to', () => C().hgp.target, v => C().hgp.target = v, 1, 10000),
-        el('p', 'Pet food for the attack pet\'s HGP. Pick the pet food the recorded merchant sells; on a refill trip it is bought like the potions, and a merchant without it skips it with a notice. Feeding is set under Automatic potion use.', 'muted'));
+        el('p', 'Pet food for the attack pet\'s HGP. Pick the pet food the recorded merchant sells; on a refill trip it is bought like the potions, and a merchant without it skips it with a notice. Feeding is set under Automatic potion use.', 'muted'),
+        this.check('Buy pet recovery kits', () => C().kit.on, v => C().kit.on = v),
+        this.select('Recovery kit', () => [[0, 'Choose the merchant\'s pet kits'], ...C().offers.filter(o => o.kind === 'kit').map(o => [o.refObjId, o.name])], () => C().kit.refObjId, v => C().kit.refObjId = Number(v)),
+        this.number('Kits low stock ≤', () => C().kit.low, v => C().kit.low = v, 0, 9999),
+        this.number('Kits refill to', () => C().kit.target, v => C().kit.target = v, 1, 10000),
+        el('p', 'Pet recovery kits for the attack and pickup pets, bought on the same refill trips as the pet food; a merchant without them skips them with a notice. Using them is set under Automatic potion use.', 'muted'));
       shop.append(el('p', 'Refill targets are total potion counts, including what is already in your bag. Used for low-supply, full-bag and revival trips, and walking-route restock when the town cycle is off. Set MP refill to 1000 for 1,000 MP potions. Changes apply to the next trip.', 'muted'));
       host.append(shop);
   },

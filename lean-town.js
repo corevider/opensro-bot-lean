@@ -655,9 +655,9 @@ const Town = {
       if (best) { this.tier[s.kind] = s.refObjId = best.refObjId; return; }
     }
     if (!offer || !(offer.maxStack > 0)) {
-      // Pet food is a convenience here: a merchant without it must not stop the town trip, and must not
-      // re-trigger one either: the supply is remembered as unbuyable until the merchant is re-recorded.
-      if (s.kind === 'hgp') { t.buySkipped.push(s.refObjId); Restock.unbuyable.add(s.refObjId); this.message = 'This merchant does not sell HGP recovery potions; skipped them for this session.'; UI.toast(this.message, 'warn', 6000); return; }
+      // Pet supplies are a convenience here: a merchant without them must not stop the town trip, and must
+      // not re-trigger one either: the supply is remembered as unbuyable until the merchant is re-recorded.
+      if (s.kind === 'hgp' || s.kind === 'kit') { t.buySkipped.push(s.refObjId); Restock.unbuyable.add(s.refObjId); this.message = 'This merchant does not sell ' + (s.kind === 'hgp' ? 'HGP recovery potions' : 'pet recovery kits') + '; skipped them for this session.'; UI.toast(this.message, 'warn', 6000); return; }
       return this.fail(s.kind === 'scroll' ? 'Selected scroll is unavailable here.' : s.kind === 'cure' ? 'Special Universal Pill (small) is unavailable here.' : s.kind === 'vigor' ? 'The selected vigor potion size is unavailable here; choose another size in Supplies.' : 'X-Large ' + s.kind.toUpperCase() + ' potion is unavailable here.');
     }
     const before = Restock.count(s.refObjId), room = World.items().filter(i => i.refObjId === s.refObjId).reduce((n, i) => n + Math.max(0, offer.maxStack - (i.quantity ?? 1)), 0);
