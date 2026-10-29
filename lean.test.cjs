@@ -2996,6 +2996,16 @@ test('an unaccepted Grass of life never stops the town trip and rests the retry'
   assert.equal(c.reason(), 'potions running low', 'the dead pet does not start another trip at once');
   f.advance(610000); assert.equal(c.reason(), 'a pet is down', 'retried ten minutes later');
 });
+test('a collar that vanishes while the grass is in flight is not a revival', () => {
+  const f = deadPetFixture(), c = f.Town;
+  c.begin(); c.tick(); assert.equal(f.commands.at(-1).kind, 'item-use');
+  f.World.applyGameplay({ ...f.World.gp, inventory: f.World.gp.inventory.filter(i => i.slot !== 16) });
+  f.advance(2000); c.tick();
+  assert.equal(c.trip.phase, 'pet-revive', 'a missing collar confirms nothing');
+  assert.ok(!f.commands.some(x => x.kind === 'item-use' && x.slot === 16), 'no summon is sent for it');
+  f.advance(12000); c.tick();
+  assert.equal(c.trip.phase, 'walk-storage', 'the timeout ends the attempt and the trip goes on');
+});
 function reconnectFixture() {
   const f = fixture(), sent = []; f.World.charName = 'Tester'; f.Hunt.start();
   f.Hook.post = msg => { if (msg.kind === 'session') sent.push(JSON.parse(JSON.stringify(msg.command))); };

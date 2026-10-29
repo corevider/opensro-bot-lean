@@ -650,8 +650,10 @@ const Town = {
     const step = t.petStep;
     if (step && now() - step.at > 12000) return giveUp(step.step === 'grass' ? 'The Grass of life was not accepted; the pet stays dead.' : 'The pet was revived but could not be summoned again.', step.step);
     if (step?.step === 'grass') {
+      // A vanished collar is not a success (a bag re-sort or stale slot would fake one): the collar must be
+      // there with its state off dead, or the grass stack must have shrunk under it.
       const collar = (gp.inventory || []).find(i => i.slot === step.slot), grass = (gp.inventory || []).find(i => i.slot === step.grassSlot);
-      if (collar?.summon?.state !== 4 || (grass?.quantity ?? 0) < step.grassQty) {
+      if (collar && (collar.summon?.state !== 4 || (grass?.quantity ?? 0) < step.grassQty)) {
         Activity.emit({ category: 'town', code: 'pet-revived', text: 'A dead pet was revived with a Grass of life.', outcome: 'confirmed', details: { slot: step.slot } });
         t.petStep = { step: 'summon', slot: step.slot, petRef: step.petRef, at: now() };
       }
