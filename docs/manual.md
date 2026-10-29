@@ -41,7 +41,9 @@ Under **Town → Scroll town cycle**, enable the cycle, set up your recall town 
 
 ## Item rules
 
-The **Items** page lists every item in the game with sBot-style filters (group, race, gender, type, SoX (Star / Moon / Sun), degree, search, only items with a rule). Per item choose **Pick** always/never and one action: **Store** (warehouse on town trips), **Sell** (pet loot at the repair merchant), **Keep**, or **Drop** (thrown away from your bag or the pet while hunting, never picked up again). Click a cell, right-click a row, or use the bulk buttons for everything shown (second click confirms). Rules come first; other items follow the Loot switches. Your own bag is never sold, and supplies the town trip needs are never stored from it.
+The **Items** page lists every item in the game with sBot-style filters under **Filter items** (group, race, gender, type, SoX (Star / Moon / Sun), degree, search, only items with a rule). Per item choose **Pick** always/never and one action: **Store** (warehouse on town trips), **Sell** (pet loot at the repair merchant), **Keep**, or **Drop** (thrown away from your bag or the pet while hunting, never picked up again). Click a cell, right-click a row, or use the bulk buttons for everything shown (second click confirms). Rules come first; other items follow the Loot switches. Your own bag is never sold, and supplies the town trip needs are never stored from it.
+
+**Combat → Buffs & imbue → Weapons and shield** sets your **Primary weapon**, **Secondary weapon** and **Shield**, picked from what you wear or carry. A choice stays when you wear the item, when it is in the warehouse or the pet, and when alchemy changes its plus or stones. Chosen gear is never sold, stored, dropped, moved to the pet or offered in your stall, whatever its item rule or stall price. **Balance free slots with the pickup pet** is under **Loot → Bag and pet space**.
 
 ## Vigor and pet potions
 

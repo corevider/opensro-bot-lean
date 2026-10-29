@@ -25,10 +25,11 @@ const Stall = {
   stall() { const s = World.gp?.stall; return s && s.phase !== 'none' ? s : null; },
   offers() { return this.stall()?.phase === 'owner' ? this.stall().offers || [] : []; },
   // Bag items with a price that are not already offered or skipped. A price is explicit intent, so the general
-  // loot protections do not apply; stackables offer their whole stack, equipment one piece.
+  // loot protections do not apply, except for the weapons and shield chosen under Combat, which are never sold;
+  // stackables offer their whole stack, equipment one piece.
   candidates(r = this.run) {
     const offered = new Set(this.offers().map(o => o.bagSlot)), skip = r ? r.skip : new Set();
-    return World.items().filter(i => !offered.has(i.slot) && !skip.has(i.slot) && this.price(i.refObjId) > 0);
+    return World.items().filter(i => !offered.has(i.slot) && !skip.has(i.slot) && this.price(i.refObjId) > 0 && !ItemRules.guarded(i));
   },
   // ownStall: the session's own stall is expected mid-run; only a fresh start refuses any open stall.
   blocked(ownStall = false) {

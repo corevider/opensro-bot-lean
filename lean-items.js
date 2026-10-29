@@ -11,9 +11,9 @@ const ITEM_WEAPON = { CH: { BLADE: 'Blade', SWORD: 'Sword', TBLADE: 'Glaive', SP
 const ITEM_ACCESSORY = { NECKLACE: 'Necklace', EARRING: 'Earring', RING: 'Ring' };
 const ITEM_DROP_CONFIRM_MS = 5000;
 const ITEM_BALANCE_CONFIRM_MS = 5000;
-const ITEM_GEAR_SLOTS = ['primaryWeapon', 'primaryShield', 'secondaryWeapon', 'secondaryShield'];
+const ITEM_GEAR_SLOTS = ['primaryWeapon', 'secondaryWeapon', 'shield'];
 const ItemRules = {
-  infos: new Map(), dropping: null, dropBan: new Map(), message: '', balancing: null, balanceBan: new Map(),
+  infos: new Map(), dropping: null, dropBan: new Map(), message: '', balancing: null, balanceBan: new Map(), gearSlots: {}, gearOwner: '',
   cfg() { return Settings.profile.items; },
   get(id) { return this.cfg().rules[id] || null; },
   // change: { pick: 'yes' | 'no' | null, act: 'store' | 'sell' | 'keep' | 'drop' | null }; null clears that part.
@@ -28,19 +28,55 @@ const ItemRules = {
     Settings.saveProfile();
   },
   count() { return Object.keys(this.cfg().rules).length; },
-  // The primary and secondary weapon / shield picked on the Items page, as BuffGear item keys. Identical copies share a key,
-  // so every copy is protected. Protected gear is never sold, stored, dropped or moved to the pet.
+  // The primary and secondary weapon and the shield picked under Combat, as BuffGear item keys. Identical copies share a
+  // key, so every copy is protected. Protected gear is never sold, stored, dropped or moved to the pet, whatever its rule.
   gearKeys() { const g = this.cfg().gear || {}; return ITEM_GEAR_SLOTS.map(k => g[k]).filter(Boolean); },
   guarded(item) { const keys = this.gearKeys(); return !!item && keys.length > 0 && keys.includes(BuffGear.key(item)); },
-  // Weapons and shields the character can choose from: worn first, then the bag.
+  // Weapons or shields the character can choose from: worn first, then the bag. Identical copies are listed once.
   gearChoices(shield) {
-    return World.items().filter(i => shield ? BuffGear.shield(i) : BuffGear.weapon(i))
+    const list = BuffGear.items().filter(i => shield ? BuffGear.shield(i) : BuffGear.weapon(i))
       .sort((a, b) => (a.slot > 7) - (b.slot > 7) || a.slot - b.slot);
+    return list.filter((i, n) => list.findIndex(j => BuffGear.key(j) === BuffGear.key(i)) === n);
+  },
+  // Select rows for one gear choice. The chosen item stays listed while it is not carried (warehouse, pet, trade).
+  gearOptions(slot) {
+    const equipped = World.gp?.equipmentSlotCount || 13, chosen = this.cfg().gear?.[slot];
+    const rows = this.gearChoices(slot === 'shield').map(i => [BuffGear.key(i),
+      `${Items.name(i.refObjId)}${i.plus ? ' +' + i.plus : ''} (${i.slot < equipped ? 'worn' : 'bag ' + (i.slot - equipped + 1)})`]);
+    if (chosen && !rows.some(([key]) => key === chosen)) rows.push([chosen, this.gearName(chosen) + ' (not in your bag)']);
+    return [['', 'None'], ...rows];
+  },
+  gearRef(key) { try { return JSON.parse(key)[0]; } catch { return 0; } },
+  gearName(key) {
+    try { const [ref, , plus] = JSON.parse(key); return Items.name(ref) + (plus ? ' +' + plus : ''); } catch { return 'Unknown item'; }
   },
   setGear(slot, key) {
     if (!ITEM_GEAR_SLOTS.includes(slot)) return;
     (this.cfg().gear ||= {})[slot] = key || null;
+    delete this.gearSlots[slot];
+    if (key) BuffGear.bad.delete(key); // picked again: the game may take it now (a level up)
     Settings.saveProfile();
+  },
+  // Chosen gear is followed by its slot: wearing it keeps its key, and when alchemy changes its plus or stones the item
+  // in the same slot with the same item number takes the choice (and its protection) over.
+  trackGear() {
+    const g = this.cfg().gear, gp = World.gp, owner = Settings.profileKey + '|' + World.charName;
+    if (owner !== this.gearOwner) { this.gearOwner = owner; this.gearSlots = {}; }
+    if (!g || !gp || gp.inventoryPending || !World.inWorld()) return;
+    const items = BuffGear.items();
+    for (const slot of ITEM_GEAR_SLOTS) {
+      const key = g[slot];
+      if (!key) continue;
+      const found = items.find(i => BuffGear.key(i) === key);
+      if (found) { this.gearSlots[slot] = found.slot; continue; }
+      const was = items.find(i => i.slot === this.gearSlots[slot]);
+      // An empty slot means the item left (destroyed, stored, traded): forget the slot, so a later drop there is not adopted.
+      if (!was) { delete this.gearSlots[slot]; continue; }
+      if (was.refObjId !== this.gearRef(key) || this.gearKeys().includes(BuffGear.key(was))) continue;
+      g[slot] = BuffGear.key(was);
+      Settings.saveProfile();
+      Log.info('Chosen gear changed (' + this.gearName(key) + ' is now ' + this.gearName(g[slot]) + '); still protected.');
+    }
   },
   // What the codename says about an item, for the filters and the table. Cached per item.
   info(id) {

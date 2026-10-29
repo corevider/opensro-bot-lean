@@ -539,9 +539,9 @@ const UI = {
       this.pane.append(subtabs);
       if (this.combatTab === 'Hunt area') this.sections('combatHuntArea', 'combatMonsters', 'combatLure');
       if (this.combatTab === 'Skills') this.sections('combatRotation', 'combatOptions', 'combatBerserk');
-      if (this.combatTab === 'Buffs & imbue') this.sections('combatBuffs', 'combatImbue');
+      if (this.combatTab === 'Buffs & imbue') this.sections('combatGear', 'combatBuffs', 'combatImbue');
     } else if (this.current === 'Loot') {
-      this.sections('lootCollection', 'lootWho');
+      this.sections('lootCollection', 'lootWho', 'lootBalance');
     } else if (this.current === 'Supplies') {
       this.sections('suppliesPotions', 'suppliesRestock');
       this.pane.append(el('p', 'Town trips, what starts them, and arrows and bolts are on the Town page.', 'muted'));
@@ -577,10 +577,10 @@ const UI = {
     return [
       { name: 'Settings', icon: 'action\\icon_cha_helper', pages: ['Supplies', 'Loot', 'Town', 'Combat', 'Settings'], sections: [
         ['suppliesPotions', 'Autopotion settings'], ['suppliesRestock', 'Buy settings'], ['townWhen', 'Back town settings'],
-        ['lootCollection', 'Pick settings'], ['lootWho', 'Who picks up what'], ['combatMonsters', 'Attack preferences'],
+        ['lootCollection', 'Pick settings'], ['lootWho', 'Who picks up what'], ['lootBalance'], ['combatMonsters', 'Attack preferences'],
         ['combatBerserk', 'Berserk settings'], ['settingsBehaviour', 'Attack behaviour / Protection'], ['settingsObstacles'], ['settingsAntiStuck']] },
       { name: 'Skills', icon: 'action\\icon_cha_auto_attack', pages: ['Combat'], sections: [
-        ['combatRotation'], ['combatOptions'], ['combatBuffs'], ['combatImbue']] },
+        ['combatRotation'], ['combatOptions'], ['combatGear'], ['combatBuffs'], ['combatImbue']] },
       { name: 'Items/Storage', icon: 'action\\cos_cmd_inventory', pages: ['Items', 'Town'], draw() {
         this.drawItems(); this.sections('townTrip', 'townCycle', 'townAmmo'); } },
       { name: 'Training place', icon: 'action\\icon_cha_camp', pages: ['Combat', 'Party'], sections: [['combatHuntArea', 'Training place'], ['partyTrace'], ['combatLure']] },
@@ -749,6 +749,12 @@ const UI = {
         ...[['giant', 'Giants'], ['giantParty', 'Giant party'], ['titan', 'Titans'], ['unique', 'Uniques'], ['elite', 'Elites'], ['party', 'Party monsters'], ['champion', 'Champions'], ['normal', 'Normal monsters']]
           .map(([key, label]) => this.check(label, () => M().berserkClasses[key], v => M().berserkClasses[key] = v))));
   },
+  section_combatGear(host) {
+    const pick = (title, slot) => this.select(title, () => ItemRules.gearOptions(slot), () => ItemRules.cfg().gear?.[slot] || '', v => ItemRules.setGear(slot, v));
+    host.append(this.group('Weapons and shield',
+      pick('Primary weapon', 'primaryWeapon'), pick('Secondary weapon', 'secondaryWeapon'), pick('Shield', 'shield'),
+      el('p', 'Pick from what you wear or carry. The choice stays when you wear the item and when alchemy changes its plus or stones. Chosen gear is never sold, stored, dropped or moved to the pet, even with an item rule, and buff swaps wear the secondary weapon first.', 'muted')));
+  },
   section_combatBuffs(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
       BuffGear.draw(host);
@@ -786,6 +792,11 @@ const UI = {
           v => { if (v === 'off') L()[key] = false; else { L()[key] = true; (L().by ||= {})[key] = v; } Loot.reset(); }));
       kinds.append(el('p', 'Each kind of drop is either left alone, taken by your pickup pet, or taken by the character. The pet collects while you fight and fills its own bag; the character walks to the item and uses your bag, so give it only the few kinds you want on you (for example potions or pills). The default collector decides for kinds you have not set yourself and for names under Always include.', 'muted'));
       host.append(kinds);
+  },
+  section_lootBalance(host) {
+    host.append(this.group('Bag and pet space',
+      this.check('Balance free slots with the pickup pet', () => ItemRules.cfg().balance, v => ItemRules.cfg().balance = v),
+      el('p', 'While hunting, items with a Sell or Store rule move to the bag or pet, whichever has more free slots. Supplies and the weapons and shield chosen under Combat never move.', 'muted')));
   },
   section_suppliesPotions(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
@@ -1136,7 +1147,7 @@ const UI = {
     const nearby = el('input'); nearby.type = 'checkbox'; nearby.checked = !!f.nearby; nearby.setAttribute('aria-label', 'Only items on the ground now');
     nearby.addEventListener('change', () => { f.nearby = nearby.checked; refresh(); });
     const nearbyLabel = el('label', null, 'field'); nearbyLabel.append(el('span', 'Only items on the ground now'), nearby);
-    const filters = this.group('Choose items',
+    const filters = this.group('Filter items',
       choose('Item group', [['all', 'All items'], ['equipment', 'Equipment'], ['weapon', 'Weapons'], ['armour', 'Armour and shields'], ['accessory', 'Accessories'], ['potion', 'Potions'],
         ['pill', 'Pills'], ['alchemy', 'Alchemy'], ['ammo', 'Arrows and bolts'], ['scroll', 'Scrolls'], ['pet', 'Pet items'], ['quest', 'Quest items'], ['mall', 'Item mall'], ['other', 'Other']], 'group'),
       choose('Race', [['', 'Any'], ['CH', 'Chinese'], ['EU', 'European']], 'race'),
@@ -1148,15 +1159,7 @@ const UI = {
     table.setAttribute('role', 'table'); table.setAttribute('aria-label', 'Item rules');
     const rules = this.group('Item rules', summary, bulk, table, pager,
       el('p', 'Pick: always takes the item whatever the Loot switches say, never leaves it. A rule is for that exact item (each size or degree is its own item), so tick Only items on the ground now to find what is dropping and set the rule on those. Store puts it in the warehouse on town trips (also from your bag, except potions and scrolls the trip needs). Sell sells it from the pet at the repair merchant; your own bag is never sold. Keep never stores or sells it. Drop throws it away from your bag or the pet while hunting, and it is never picked up again. Right-click a row for the same choices.', 'muted'));
-    const gearOptions = shield => () => [['', 'None'], ...ItemRules.gearChoices(shield).map(i => [BuffGear.key(i), `${Items.name(i.refObjId)}${i.plus ? ' +' + i.plus : ''} (${i.slot < 8 ? 'worn' : 'bag ' + (i.slot - (World.gp?.equipmentSlotCount || 13) + 1)})`])];
-    const gearPick = (title, slot, shield) => this.select(title, gearOptions(shield), () => ItemRules.cfg().gear?.[slot] || '', v => ItemRules.setGear(slot, v));
-    const gear = this.group('Pet and gear',
-      this.check('Balance free slots with the pickup pet', () => ItemRules.cfg().balance, v => ItemRules.cfg().balance = v),
-      el('p', 'While hunting, items with a Sell or Store rule move to the bag or pet, whichever has more free slots. Gear picked below and supplies never move.', 'muted'),
-      gearPick('Primary weapon', 'primaryWeapon', false), gearPick('Primary shield', 'primaryShield', true),
-      gearPick('Secondary weapon', 'secondaryWeapon', false), gearPick('Secondary shield', 'secondaryShield', true),
-      el('p', 'Pick from worn gear or your bag. Chosen gear is never sold, stored, dropped or moved to the pet, and the secondary weapon is the one buff swaps wear first.', 'muted'));
-    this.pane.append(filters, gear, rules);
+    this.pane.append(filters, rules);
     const set = (ids, change, label) => { ItemRules.set(ids, change); this.toast(`${label}: ${ids.length} item${ids.length === 1 ? '' : 's'}.`); renderTable(); };
     // Bulk buttons ask for a second click when they change more than one item.
     const bulkActions = [['Pick always', { pick: 'yes' }], ['Pick never', { pick: 'no' }], ['Store', { act: 'store' }], ['Sell', { act: 'sell' }], ['Keep', { act: 'keep' }],
