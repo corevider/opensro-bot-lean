@@ -3,9 +3,9 @@
 // are never resent until the previous one is seen to be consumed, and a pet is left alone — 30 s when a kit is
 // not seen consumed, 5 min when confirmed kits never raise its HP — instead of burning kits on a bad HP reading.
 const PetPotion = {
-  maxHp: null, loading: null, retryAt: 0, pending: null, blocked: new Map(), stale: new Map(), lastAt: -Infinity, message: 'Pet potions off.',
+  maxHp: null, loading: null, retryAt: 0, pending: null, settled: null, blocked: new Map(), stale: new Map(), lastAt: -Infinity, message: 'Pet potions off.',
   cfg() { return Settings.profile.potion.petHp; },
-  reset() { this.pending = null; this.blocked.clear(); this.stale.clear(); this.lastAt = -Infinity; this.message = this.cfg().on ? 'Waiting for a pet.' : 'Pet potions off.'; },
+  reset() { this.pending = null; this.settled = null; this.blocked.clear(); this.stale.clear(); this.lastAt = -Infinity; this.message = this.cfg().on ? 'Waiting for a pet.' : 'Pet potions off.'; },
   kits() { return World.items().filter(i => Number.isInteger(i.typeFlags) && ItemType.potionCategory(i.typeFlags) === 4 && (i.quantity ?? 1) > 0); },
   total(ref) { return this.kits().filter(i => i.refObjId === ref).reduce((n, i) => n + (i.quantity ?? 1), 0); },
   heal(item) { return Number(item.tooltip?.fields?.itemParam1_29c) || 0; },
@@ -46,7 +46,7 @@ const PetPotion = {
   },
   tick() {
     const c = this.cfg(), P = Settings.profile.potion;
-    if (!c.on || !P.enabled) { this.pending = null; this.message = 'Pet potions off.'; return false; }
+    if (!c.on || !P.enabled) { this.pending = null; this.settled = null; this.message = 'Pet potions off.'; return false; }
     if (!World.inWorld() || World.isDead()) return false;
     this.load();
     const p = this.pending;
@@ -54,17 +54,29 @@ const PetPotion = {
       if (this.total(p.ref) < p.before) {
         Activity.emit({ category: 'potion', code: 'pet-kit-consumed', text: 'Pet recovery kit consumption observed in inventory.', outcome: 'confirmed', details: { quantity: 1 } });
         this.pending = null;
-        // The server consumes a kit even on a full pet, so a confirmed kit whose HP does not move means the
-        // reading is wrong; three in a row rest the pet instead of draining the stack.
-        const flat = this.petHp(p.gid), mark = this.stale.get(p.gid);
-        if (Number.isFinite(flat) && flat === p.hp) {
-          const count = (mark?.count ?? 0) + 1;
-          if (count >= 3) { this.blocked.set(p.gid, now() + 300000); this.stale.delete(p.gid); this.message = 'Confirmed kits never raise this pet HP; waiting 5 min.'; return false; }
-          this.stale.set(p.gid, { count });
-        }
-        else this.stale.delete(p.gid);
+        // The stack shrinking and the HP update (0x33A6) are separate messages, so the heal can land a
+        // snapshot later: hold the flat judgement for a short grace before counting it.
+        this.settled = { gid: p.gid, hp: p.hp, at: now() };
       }
       else if (now() - p.at > 5000) { this.pending = null; this.blocked.set(p.gid, now() + 30000); this.message = 'Pet recovery kit consumption unconfirmed; waiting 30 s.'; }
+      else return false;
+    }
+    if (this.settled) {
+      const s = this.settled, flat = this.petHp(s.gid);
+      if (!Number.isFinite(flat) || flat !== s.hp) { this.stale.delete(s.gid); this.settled = null; }
+      else if (now() - s.at > 1500) {
+        this.settled = null;
+        // The server consumes a kit even on a full pet, so a confirmed kit whose HP never moved means the
+        // reading is wrong; three in a row rest the pet instead of draining the stack.
+        const count = (this.stale.get(s.gid)?.count ?? 0) + 1;
+        if (count >= 3) {
+          this.blocked.set(s.gid, now() + 300000); this.stale.delete(s.gid);
+          this.message = 'Confirmed kits never raise this pet HP; waiting 5 min.';
+          Activity.emit({ category: 'potion', code: 'pet-kit-flat', text: 'Three confirmed kits left the pet HP untouched; the HP reading looks wrong, resting the pet 5 min.', outcome: 'refused', details: { gid: s.gid, hp: flat } });
+          return false;
+        }
+        this.stale.set(s.gid, { count });
+      }
       else return false;
     }
     if (World.gp.inventoryPending || now() - this.lastAt < 1500 || now() - Potion.lastUse < P.delayMs) return false;

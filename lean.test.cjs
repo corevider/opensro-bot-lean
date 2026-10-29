@@ -2804,6 +2804,7 @@ test('pet auto potion never touches the wrong pets, the player potions or an unc
   f.advance(31000); f.Controller.tick(); assert.equal(petUses(f).length, 2, 'retried after the 30 s pause');
   f = petPotionFixture(); f.Controller.tick(); assert.equal(petUses(f).length, 1);
   f.World.applyGameplay({ ...f.World.gp, inventory: f.World.gp.inventory.map(i => i.slot === 21 ? { ...i, quantity: 4 } : i), cosRecords: [{ gid: 50, refObjId: 500, band: 3, hp: 300, status: 5, dead: false }] });
+  f.advance(2000); f.Controller.tick();
   f.advance(2000); f.Controller.tick(); assert.equal(petUses(f).length, 2, 'consumption confirms the first and the next kit may follow');
   f = petPotionFixture(); f.PetPotion.maxHp = null; f.Controller.tick(); assert.equal(petUses(f).length, 0); assert.match(f.PetPotion.message, /Waiting for pet HP data/);
   f = petPotionFixture(); assert.equal(f.Cmd.itemUseOnPet(20, 999), false, 'unknown pet'); assert.equal(f.Cmd.itemUseOnPet(99, 50), false, 'unknown item');
@@ -2819,17 +2820,33 @@ test('pet auto potion takes the maximum from the catalogue, never a vitals row',
 });
 test('a pet whose HP never rises on confirmed kits is rested, not drained', () => {
   const f = petPotionFixture();
+  const events = []; f.Activity.emit = e => events.push(e);
   const consume = quantity => f.World.applyGameplay({ ...f.World.gp,
     inventory: f.World.gp.inventory.map(i => i.slot === 21 ? { ...i, quantity } : i),
     cosRecords: [{ gid: 50, refObjId: 500, band: 3, hp: 300, status: 5, dead: false }] });
   for (let n = 0; n < 3; n++) {
     f.Controller.tick(); assert.equal(petUses(f).length, n + 1, 'kit ' + (n + 1) + ' goes out');
     consume(4 - n); f.advance(2000);
+    f.Controller.tick(); f.advance(2000);
   }
   f.Controller.tick(); assert.equal(petUses(f).length, 3, 'no fourth kit after three confirmed kits with no HP movement');
   assert.match(f.PetPotion.message, /5 min/);
+  assert.ok(events.some(e => e.code === 'pet-kit-flat' && e.details.gid === 50), 'the rest is reported as an activity event');
   f.advance(2000); f.Controller.tick(); assert.equal(petUses(f).length, 3, 'the five-minute rest holds');
   f.advance(300000); f.Controller.tick(); assert.equal(petUses(f).length, 4, 'after the rest a wrong reading only burns one kit per round');
+});
+test('a heal that lands a snapshot after the consumption is never counted flat', () => {
+  const f = petPotionFixture();
+  f.Controller.tick(); assert.equal(petUses(f).length, 1);
+  f.advance(1000);
+  f.World.applyGameplay({ ...f.World.gp, inventory: f.World.gp.inventory.map(i => i.slot === 21 ? { ...i, quantity: 4 } : i), cosRecords: [{ gid: 50, refObjId: 500, band: 3, hp: 300, status: 5, dead: false }] });
+  f.Controller.tick();
+  assert.equal(f.PetPotion.stale.size, 0, 'the grace window holds the judgement while the HP update is still on its way');
+  f.advance(1000);
+  f.World.applyGameplay({ ...f.World.gp, cosRecords: [{ gid: 50, refObjId: 500, band: 3, hp: 1000, status: 5, dead: false }] });
+  f.Controller.tick();
+  assert.equal(f.PetPotion.stale.size, 0, 'the late heal clears the flat check');
+  assert.equal(petUses(f).length, 1, 'and no extra kit was burned');
 });
 test('kits that raise the pet HP keep flowing without the flat-HP rest', () => {
   const f = petPotionFixture();
