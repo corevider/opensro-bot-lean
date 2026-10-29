@@ -2926,11 +2926,17 @@ test('hgp potions are a restock supply bought at the merchant and skipped, not f
   gp.shop = { npc: 61, offers: [offer(15, 4332), offer(3001, hgpTf)] }; gp.inventory = gp.inventory.map(i => i.refObjId === 15 ? { ...i, quantity: 50 } : i);
   c.tick();
   assert.deepEqual(JSON.parse(JSON.stringify(f.commands.at(-1))), { kind: 'shop-buy', tab: 0, slot: 0, quantity: 40 }, 'the pet food is bought like a potion');
-  const g = townFixture(); g.Restock.cfg().hgp.on = true; g.Restock.cfg().hgp.refObjId = 3001;
+  const g = townFixture(); g.Restock.cfg().hgp.on = true; g.Restock.cfg().hgp.refObjId = 3001; g.Town.cfg().petFull = false;
   g.Town.begin(); g.Town.enter('buy'); g.World.gp.target = 61; g.World.gp.targetCapabilities = 1;
   g.World.gp.shop = { npc: 61, offers: [offer(15, 4332)] }; g.World.gp.inventory = g.World.gp.inventory.map(i => i.refObjId === 15 ? { ...i, quantity: 50 } : i);
   g.Town.tick(); assert.match(g.Town.message, /does not sell HGP recovery potions/);
   g.Town.tick(); assert.ok(g.Town.trip && g.Town.trip.phase !== 'buy', 'a merchant without pet food skips it and the trip goes on');
+  assert.ok(g.Restock.unbuyable.has(3001), 'the merchant is remembered as not selling the pet food');
+  assert.ok(!g.Town.supplies().some(s => s.kind === 'hgp'), 'an unsold pet food leaves the refill supplies');
+  assert.equal(g.Town.reason(), '', 'and no longer re-triggers town trips for it');
+  const h = townFixture(); h.Restock.cfg().hgp.on = true; h.Town.cfg().petFull = false; h.World.gp.inventory = h.World.gp.inventory.map(i => i.refObjId === 15 ? { ...i, quantity: 50 } : i);
+  assert.ok(!h.Town.supplies().some(s => s.kind === 'hgp'), 'an unchosen pet food never rides the trips');
+  assert.equal(h.Town.reason(), '', 'and never blocks or triggers restock on its own');
 });
 function reconnectFixture() {
   const f = fixture(), sent = []; f.World.charName = 'Tester'; f.Hunt.start();

@@ -62,11 +62,20 @@ const Restock = {
     }
     Hunt.setCenter();
     this.cancelRecording();
+    this.unbuyable.clear();
     Settings.saveProfile();
     this.tell('Route and hunt centre saved. Choose potions and quantities, then enable auto buying.');
   },
   // Fixed retail Special Universal Pill (small): strongest universal cure, ref 58.
-  supplies() { return ['hp', 'mp', 'vigor', 'cure', 'hgp'].filter(k => this.cfg()[k].on).map(k => ({ kind: k, ...this.cfg()[k], ...(k === 'cure' ? { refObjId: 58 } : {}) })); },
+  // Pet supplies need a chosen item, and one the recorded merchant turned out not to sell must not re-trigger
+  // trips for the rest of the session (re-record the merchant to retry); a profile switch clears that memory.
+  unbuyable: new Set(),
+  supplies() {
+    const c = this.cfg();
+    return ['hp', 'mp', 'vigor', 'cure', 'hgp']
+      .filter(k => c[k].on && !this.unbuyable.has(c[k].refObjId) && (k !== 'hgp' || c[k].refObjId > 0))
+      .map(k => ({ kind: k, ...c[k], ...(k === 'cure' ? { refObjId: 58 } : {}) }));
+  },
   validate() {
     const c = this.cfg(), s = this.supplies();
     if (!c.vendor || c.route.length < 2) return 'Record a merchant-to-hunt route first.';
@@ -172,7 +181,7 @@ const Restock = {
       }
       const offer = shop.offers.find(o => o.refObjId === s.refObjId && this.offerKind(o) === s.kind);
       // Pet food is a convenience here: a merchant without it must not stop the potion refill.
-      if (!offer && s.kind === 'hgp') { t.skipped.push(s.refObjId); this.tell('This merchant does not sell HGP recovery potions; skipped them.'); return true; }
+      if (!offer && s.kind === 'hgp') { t.skipped.push(s.refObjId); this.unbuyable.add(s.refObjId); this.tell('This merchant does not sell HGP recovery potions; skipped them for this session.'); return true; }
       if (!offer) { this.fail(s.kind === 'cure' ? 'Special Universal Pill (small) is unavailable at this merchant.' : 'Selected potion is unavailable at this merchant.'); return true; }
       const before = this.count(s.refObjId);
       const stackRoom = World.items().filter(i => i.refObjId === s.refObjId).reduce((n, i) => n + Math.max(0, offer.maxStack - (i.quantity ?? 1)), 0);

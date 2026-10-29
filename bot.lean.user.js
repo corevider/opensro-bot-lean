@@ -1486,11 +1486,20 @@ const Restock = {
     }
     Hunt.setCenter();
     this.cancelRecording();
+    this.unbuyable.clear();
     Settings.saveProfile();
     this.tell('Route and hunt centre saved. Choose potions and quantities, then enable auto buying.');
   },
   // Fixed retail Special Universal Pill (small): strongest universal cure, ref 58.
-  supplies() { return ['hp', 'mp', 'vigor', 'cure', 'hgp'].filter(k => this.cfg()[k].on).map(k => ({ kind: k, ...this.cfg()[k], ...(k === 'cure' ? { refObjId: 58 } : {}) })); },
+  // Pet supplies need a chosen item, and one the recorded merchant turned out not to sell must not re-trigger
+  // trips for the rest of the session (re-record the merchant to retry); a profile switch clears that memory.
+  unbuyable: new Set(),
+  supplies() {
+    const c = this.cfg();
+    return ['hp', 'mp', 'vigor', 'cure', 'hgp']
+      .filter(k => c[k].on && !this.unbuyable.has(c[k].refObjId) && (k !== 'hgp' || c[k].refObjId > 0))
+      .map(k => ({ kind: k, ...c[k], ...(k === 'cure' ? { refObjId: 58 } : {}) }));
+  },
   validate() {
     const c = this.cfg(), s = this.supplies();
     if (!c.vendor || c.route.length < 2) return 'Record a merchant-to-hunt route first.';
@@ -1599,7 +1608,7 @@ const Restock = {
       }
       const offer = shop.offers.find(o => o.refObjId === s.refObjId && this.offerKind(o) === s.kind);
       // Pet food is a convenience here: a merchant without it must not stop the potion refill.
-      if (!offer && s.kind === 'hgp') { t.skipped.push(s.refObjId); this.tell('This merchant does not sell HGP recovery potions; skipped them.'); return true; }
+      if (!offer && s.kind === 'hgp') { t.skipped.push(s.refObjId); this.unbuyable.add(s.refObjId); this.tell('This merchant does not sell HGP recovery potions; skipped them for this session.'); return true; }
       if (!offer) { this.fail(s.kind === 'cure' ? 'Special Universal Pill (small) is unavailable at this merchant.' : 'Selected potion is unavailable at this merchant.'); return true; }
       const before = this.count(s.refObjId);
       const stackRoom = World.items().filter(i => i.refObjId === s.refObjId).reduce((n, i) => n + Math.max(0, offer.maxStack - (i.quantity ?? 1)), 0);
@@ -7656,8 +7665,9 @@ const Town = {
       if (best) { this.tier[s.kind] = s.refObjId = best.refObjId; return; }
     }
     if (!offer || !(offer.maxStack > 0)) {
-      // Pet food is a convenience here: a merchant without it must not stop the town trip.
-      if (s.kind === 'hgp') { t.buySkipped.push(s.refObjId); this.message = 'This merchant does not sell HGP recovery potions; skipped them.'; UI.toast(this.message, 'warn', 6000); return; }
+      // Pet food is a convenience here: a merchant without it must not stop the town trip, and must not
+      // re-trigger one either: the supply is remembered as unbuyable until the merchant is re-recorded.
+      if (s.kind === 'hgp') { t.buySkipped.push(s.refObjId); Restock.unbuyable.add(s.refObjId); this.message = 'This merchant does not sell HGP recovery potions; skipped them for this session.'; UI.toast(this.message, 'warn', 6000); return; }
       return this.fail(s.kind === 'scroll' ? 'Selected scroll is unavailable here.' : s.kind === 'cure' ? 'Special Universal Pill (small) is unavailable here.' : s.kind === 'vigor' ? 'The selected vigor potion size is unavailable here; choose another size in Supplies.' : 'X-Large ' + s.kind.toUpperCase() + ' potion is unavailable here.');
     }
     const before = Restock.count(s.refObjId), room = World.items().filter(i => i.refObjId === s.refObjId).reduce((n, i) => n + Math.max(0, offer.maxStack - (i.quantity ?? 1)), 0);
@@ -7668,7 +7678,7 @@ const Town = {
     const price = toBigInt(offer.price), gold = toBigInt(gp.progression.gold);
     if (price > 0n && price * BigInt(quantity) > gold) quantity = Number(gold / price);
     if (quantity < 1) {
-      if (before > 0) { t.buySkipped.push(s.refObjId); this.message = 'Not enough gold to top up ' + s.kind + '; buying what is left.'; UI.toast(this.message, 'warn', 6000); return; }
+      if (before > 0) { t.buySkipped.push(s.refObjId); if (s.kind === 'hgp') Restock.unbuyable.add(s.refObjId); this.message = 'Not enough gold to top up ' + s.kind + '; buying what is left.'; UI.toast(this.message, 'warn', 6000); return; }
       return this.fail('Not enough gold for potion refill.');
     }
     if (Cmd.raw({ kind: 'shop-buy', tab: offer.tab, slot: offer.slot, quantity }, 'Town: refill ' + s.kind)) t.pending = { ref: s.refObjId, before, quantity, at: now() };
@@ -11449,12 +11459,12 @@ const Setup = {
 // previous one is seen to be consumed, and a pet is left alone — 30 s when an item is not seen consumed, 5 min
 // when confirmed kits never raise its HP — instead of burning supplies on a bad HP reading.
 const PetPotion = {
-  maxHp: null, loading: null, retryAt: 0, pending: null, blocked: new Map(), stale: new Map(), lastAt: -Infinity,
+  maxHp: null, loading: null, retryAt: 0, pending: null, settled: null, blocked: new Map(), stale: new Map(), lastAt: -Infinity,
   feedPending: null, feedBlocked: new Map(), feedLastAt: -Infinity, message: 'Pet potions off.',
   cfg() { return Settings.profile.potion.petHp; },
   hgpCfg() { return Settings.profile.potion.petHgp; },
   reset() {
-    this.pending = null; this.blocked.clear(); this.stale.clear(); this.lastAt = -Infinity;
+    this.pending = null; this.settled = null; this.blocked.clear(); this.stale.clear(); this.lastAt = -Infinity;
     this.feedPending = null; this.feedBlocked.clear(); this.feedLastAt = -Infinity;
     this.message = this.cfg().on || this.hgpCfg().on ? 'Waiting for a pet.' : 'Pet potions off.';
   },
@@ -11516,7 +11526,7 @@ const PetPotion = {
   },
   tick() {
     const P = Settings.profile.potion;
-    if ((!this.cfg().on && !this.hgpCfg().on) || !P.enabled) { this.pending = null; this.feedPending = null; this.message = 'Pet potions off.'; return false; }
+    if ((!this.cfg().on && !this.hgpCfg().on) || !P.enabled) { this.pending = null; this.settled = null; this.feedPending = null; this.message = 'Pet potions off.'; return false; }
     if (!World.inWorld() || World.isDead()) return false;
     this.load();
     const healed = this.healTick();
@@ -11531,17 +11541,29 @@ const PetPotion = {
       if (this.total(p.ref) < p.before) {
         Activity.emit({ category: 'potion', code: 'pet-kit-consumed', text: 'Pet recovery kit consumption observed in inventory.', outcome: 'confirmed', details: { quantity: 1 } });
         this.pending = null;
-        // The server consumes a kit even on a full pet, so a confirmed kit whose HP does not move means the
-        // reading is wrong; three in a row rest the pet instead of draining the stack.
-        const flat = this.petHp(p.gid), mark = this.stale.get(p.gid);
-        if (Number.isFinite(flat) && flat === p.hp) {
-          const count = (mark?.count ?? 0) + 1;
-          if (count >= 3) { this.blocked.set(p.gid, now() + 300000); this.stale.delete(p.gid); this.message = 'Confirmed kits never raise this pet HP; waiting 5 min.'; return false; }
-          this.stale.set(p.gid, { count });
-        }
-        else this.stale.delete(p.gid);
+        // The stack shrinking and the HP update (0x33A6) are separate messages, so the heal can land a
+        // snapshot later: hold the flat judgement for a short grace before counting it.
+        this.settled = { gid: p.gid, hp: p.hp, at: now() };
       }
       else if (now() - p.at > 5000) { this.pending = null; this.blocked.set(p.gid, now() + 30000); this.message = 'Pet recovery kit consumption unconfirmed; waiting 30 s.'; }
+      else return false;
+    }
+    if (this.settled) {
+      const s = this.settled, flat = this.petHp(s.gid);
+      if (!Number.isFinite(flat) || flat !== s.hp) { this.stale.delete(s.gid); this.settled = null; }
+      else if (now() - s.at > 1500) {
+        this.settled = null;
+        // The server consumes a kit even on a full pet, so a confirmed kit whose HP never moved means the
+        // reading is wrong; three in a row rest the pet instead of draining the stack.
+        const count = (this.stale.get(s.gid)?.count ?? 0) + 1;
+        if (count >= 3) {
+          this.blocked.set(s.gid, now() + 300000); this.stale.delete(s.gid);
+          this.message = 'Confirmed kits never raise this pet HP; waiting 5 min.';
+          Activity.emit({ category: 'potion', code: 'pet-kit-flat', text: 'Three confirmed kits left the pet HP untouched; the HP reading looks wrong, resting the pet 5 min.', outcome: 'refused', details: { gid: s.gid, hp: flat } });
+          return false;
+        }
+        this.stale.set(s.gid, { count });
+      }
       else return false;
     }
     if (World.gp.inventoryPending || now() - this.lastAt < 1500 || now() - Potion.lastUse < Settings.profile.potion.delayMs) return false;
@@ -11575,7 +11597,10 @@ const PetPotion = {
     }
     if (World.gp.inventoryPending || now() - this.feedLastAt < 1500 || now() - Potion.lastUse < Settings.profile.potion.delayMs) return false;
     const pets = this.hungerPets().filter(x => (this.feedBlocked.get(x.gid) ?? 0) <= now()).sort((a, b) => a.pct - b.pct);
-    if (!pets.length) return false;
+    if (!pets.length) {
+      if (World.gp?.cosRecords?.some(r => r && !r.dead && r.hp > 0 && r.band === 3 && !Number.isFinite(r.satiety))) this.message = 'Waiting for pet HGP data.';
+      return false;
+    }
     const pet = pets[0];
     if (pet.pct > c.pct) return false;
     const food = this.pickFood(10000 - pet.satiety);
@@ -16829,7 +16854,7 @@ function boot() {
     const key = name ? 'profile:' + name : 'profile:default';
     if (key !== Settings.profileKey) { Town.lastScrollPoint = null; Town.deathPoint = null; stopAll(); Settings.useCharacter(name); }
   });
-  bus.on('profile', () => { PetPotion.reset(); AutoMastery.reset(); StatPoints.reset(); Trace.reset(); BuffGear.reset(); Town.lastScrollPoint = null; Town.deathPoint = null; SpeedScroll.reset(); RepairHammer.reset(); Party.reset(); Resurrect.reset(); stopAll(); Restock.cancelRecording(); Loot.reset(); Wardrobe.applyNow(); UI.draw(); });
+  bus.on('profile', () => { PetPotion.reset(); AutoMastery.reset(); StatPoints.reset(); Trace.reset(); BuffGear.reset(); Town.lastScrollPoint = null; Town.deathPoint = null; SpeedScroll.reset(); RepairHammer.reset(); Party.reset(); Resurrect.reset(); stopAll(); Restock.cancelRecording(); Restock.unbuyable.clear(); Loot.reset(); Wardrobe.applyNow(); UI.draw(); });
   bus.on('phase', phase => {
     if (phase !== 'world') {
       BuffGear.interrupt('World transition interrupted buff swaps.', true);

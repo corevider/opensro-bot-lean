@@ -655,8 +655,9 @@ const Town = {
       if (best) { this.tier[s.kind] = s.refObjId = best.refObjId; return; }
     }
     if (!offer || !(offer.maxStack > 0)) {
-      // Pet food is a convenience here: a merchant without it must not stop the town trip.
-      if (s.kind === 'hgp') { t.buySkipped.push(s.refObjId); this.message = 'This merchant does not sell HGP recovery potions; skipped them.'; UI.toast(this.message, 'warn', 6000); return; }
+      // Pet food is a convenience here: a merchant without it must not stop the town trip, and must not
+      // re-trigger one either: the supply is remembered as unbuyable until the merchant is re-recorded.
+      if (s.kind === 'hgp') { t.buySkipped.push(s.refObjId); Restock.unbuyable.add(s.refObjId); this.message = 'This merchant does not sell HGP recovery potions; skipped them for this session.'; UI.toast(this.message, 'warn', 6000); return; }
       return this.fail(s.kind === 'scroll' ? 'Selected scroll is unavailable here.' : s.kind === 'cure' ? 'Special Universal Pill (small) is unavailable here.' : s.kind === 'vigor' ? 'The selected vigor potion size is unavailable here; choose another size in Supplies.' : 'X-Large ' + s.kind.toUpperCase() + ' potion is unavailable here.');
     }
     const before = Restock.count(s.refObjId), room = World.items().filter(i => i.refObjId === s.refObjId).reduce((n, i) => n + Math.max(0, offer.maxStack - (i.quantity ?? 1)), 0);
@@ -667,7 +668,7 @@ const Town = {
     const price = toBigInt(offer.price), gold = toBigInt(gp.progression.gold);
     if (price > 0n && price * BigInt(quantity) > gold) quantity = Number(gold / price);
     if (quantity < 1) {
-      if (before > 0) { t.buySkipped.push(s.refObjId); this.message = 'Not enough gold to top up ' + s.kind + '; buying what is left.'; UI.toast(this.message, 'warn', 6000); return; }
+      if (before > 0) { t.buySkipped.push(s.refObjId); if (s.kind === 'hgp') Restock.unbuyable.add(s.refObjId); this.message = 'Not enough gold to top up ' + s.kind + '; buying what is left.'; UI.toast(this.message, 'warn', 6000); return; }
       return this.fail('Not enough gold for potion refill.');
     }
     if (Cmd.raw({ kind: 'shop-buy', tab: offer.tab, slot: offer.slot, quantity }, 'Town: refill ' + s.kind)) t.pending = { ref: s.refObjId, before, quantity, at: now() };
