@@ -2809,6 +2809,39 @@ test('pet auto potion never touches the wrong pets, the player potions or an unc
   f = petPotionFixture(); assert.equal(f.Cmd.itemUseOnPet(20, 999), false, 'unknown pet'); assert.equal(f.Cmd.itemUseOnPet(99, 50), false, 'unknown item');
   assert.equal(f.Cmd.itemUseOnPet(20, 50), true);
 });
+test('pet auto potion takes the maximum from the catalogue, never a vitals row', () => {
+  let f = petPotionFixture({ vitals: [{ gid: 50, hp: 1000, maxHp: 999999 }] });
+  f.World.applyGameplay({ ...f.World.gp, cosRecords: [{ gid: 50, refObjId: 500, band: 3, hp: 1000, status: 5, dead: false }] });
+  f.Controller.tick(); assert.equal(petUses(f).length, 0, 'a full pet stays full even when a vitals row claims a huge maximum');
+  assert.match(f.PetPotion.message, /heals at/);
+  f = petPotionFixture({ vitals: [{ gid: 50, hp: 100, maxHp: 999999 }] });
+  f.Controller.tick(); assert.equal(petUses(f).length, 1, 'the live vitals HP still drives the percentage over the catalogue maximum');
+});
+test('a pet whose HP never rises on confirmed kits is rested, not drained', () => {
+  const f = petPotionFixture();
+  const consume = quantity => f.World.applyGameplay({ ...f.World.gp,
+    inventory: f.World.gp.inventory.map(i => i.slot === 21 ? { ...i, quantity } : i),
+    cosRecords: [{ gid: 50, refObjId: 500, band: 3, hp: 300, status: 5, dead: false }] });
+  for (let n = 0; n < 3; n++) {
+    f.Controller.tick(); assert.equal(petUses(f).length, n + 1, 'kit ' + (n + 1) + ' goes out');
+    consume(4 - n); f.advance(2000);
+  }
+  f.Controller.tick(); assert.equal(petUses(f).length, 3, 'no fourth kit after three confirmed kits with no HP movement');
+  assert.match(f.PetPotion.message, /5 min/);
+  f.advance(2000); f.Controller.tick(); assert.equal(petUses(f).length, 3, 'the five-minute rest holds');
+  f.advance(300000); f.Controller.tick(); assert.equal(petUses(f).length, 4, 'after the rest a wrong reading only burns one kit per round');
+});
+test('kits that raise the pet HP keep flowing without the flat-HP rest', () => {
+  const f = petPotionFixture();
+  const healTo = (hp, quantity) => f.World.applyGameplay({ ...f.World.gp,
+    inventory: f.World.gp.inventory.map(i => i.slot === 21 ? { ...i, quantity } : i),
+    cosRecords: [{ gid: 50, refObjId: 500, band: 3, hp, status: 5, dead: false }] });
+  f.Controller.tick(); assert.equal(petUses(f).length, 1);
+  healTo(500, 4); f.advance(2000);
+  f.Controller.tick(); assert.equal(petUses(f).length, 2, 'a partial heal clears the flat counter and the next kit goes out');
+  healTo(1000, 3); f.advance(2000);
+  f.Controller.tick(); assert.equal(petUses(f).length, 2, 'full HP stops the kits');
+});
 test('vigor potions are a restock supply with a chosen size, bought on town trips and recognised in shops', () => {
   const f = townFixture(), r = f.Restock.cfg(), c = f.Town;
   assert.equal(fixture().Restock.cfg().vigor.on, false); assert.equal(fixture().Restock.cfg().vigor.refObjId, 22);
