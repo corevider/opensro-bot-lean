@@ -211,7 +211,7 @@ const DEFAULT_PROFILE = {
   },
   potion: {
     enabled: true, speedScroll: false, repairHammer: { on: false, pct: 50 }, hp: { on: true, pct: 60 }, mp: { on: true, pct: 40 },
-    vigor: { on: true, hpPct: 30, mpPct: 15 }, cure: { on: true }, petHp: { on: false, pct: 50 },
+    vigor: { on: true, hpPct: 30, mpPct: 15 }, cure: { on: true }, petHp: { on: false, pct: 50 }, petHgp: { on: false, pct: 30 },
     prefer: { hp: 0, mp: 0, vigor: 0, cure: 0 }, delayMs: 350,
     restock: {
       enabled: false, vendor: null, route: [], offers: [],
@@ -222,6 +222,7 @@ const DEFAULT_PROFILE = {
       mp: { on: true, refObjId: 0, low: 20, target: 300 },
       cure: { on: false, refObjId: 58, low: 10, target: 50 },
       vigor: { on: false, refObjId: 22, low: 10, target: 50 },
+      hgp: { on: false, refObjId: 0, low: 5, target: 50 },
       ammo: { arrow: { on: false, low: 200, target: 2000 }, bolt: { on: false, low: 200, target: 2000 } },
     },
   },
@@ -1440,7 +1441,7 @@ const Restock = {
     // Only single-item gold offers; package quantities have different purchase semantics.
     if (o.currency !== undefined && o.currency !== 1) return '';
     if (o.contents?.length && (o.contents.length !== 1 || o.contents[0].refObjId !== o.refObjId || o.contents[0].quantity !== 1)) return '';
-    return cat === 1 ? 'hp' : cat === 2 ? 'mp' : cat === 3 ? 'vigor' : o.refObjId === 58 && ItemType.isCure(item?.typeFlags ?? 0) ? 'cure' : '';
+    return cat === 1 ? 'hp' : cat === 2 ? 'mp' : cat === 3 ? 'vigor' : cat === 9 ? 'hgp' : o.refObjId === 58 && ItemType.isCure(item?.typeFlags ?? 0) ? 'cure' : '';
   },
   activeShop() {
     const gp = World.gp;
@@ -1489,7 +1490,7 @@ const Restock = {
     this.tell('Route and hunt centre saved. Choose potions and quantities, then enable auto buying.');
   },
   // Fixed retail Special Universal Pill (small): strongest universal cure, ref 58.
-  supplies() { return ['hp', 'mp', 'vigor', 'cure'].filter(k => this.cfg()[k].on).map(k => ({ kind: k, ...this.cfg()[k], ...(k === 'cure' ? { refObjId: 58 } : {}) })); },
+  supplies() { return ['hp', 'mp', 'vigor', 'cure', 'hgp'].filter(k => this.cfg()[k].on).map(k => ({ kind: k, ...this.cfg()[k], ...(k === 'cure' ? { refObjId: 58 } : {}) })); },
   validate() {
     const c = this.cfg(), s = this.supplies();
     if (!c.vendor || c.route.length < 2) return 'Record a merchant-to-hunt route first.';
@@ -1597,6 +1598,8 @@ const Restock = {
         return true;
       }
       const offer = shop.offers.find(o => o.refObjId === s.refObjId && this.offerKind(o) === s.kind);
+      // Pet food is a convenience here: a merchant without it must not stop the potion refill.
+      if (!offer && s.kind === 'hgp') { t.skipped.push(s.refObjId); this.tell('This merchant does not sell HGP recovery potions; skipped them.'); return true; }
       if (!offer) { this.fail(s.kind === 'cure' ? 'Special Universal Pill (small) is unavailable at this merchant.' : 'Selected potion is unavailable at this merchant.'); return true; }
       const before = this.count(s.refObjId);
       const stackRoom = World.items().filter(i => i.refObjId === s.refObjId).reduce((n, i) => n + Math.max(0, offer.maxStack - (i.quantity ?? 1)), 0);
@@ -7652,7 +7655,11 @@ const Town = {
       const best = shop.offers.filter(o => Restock.offerKind(o) === s.kind && o.maxStack > 0).sort((x, y) => price(y) > price(x) ? 1 : price(y) < price(x) ? -1 : 0)[0];
       if (best) { this.tier[s.kind] = s.refObjId = best.refObjId; return; }
     }
-    if (!offer || !(offer.maxStack > 0)) return this.fail(s.kind === 'scroll' ? 'Selected scroll is unavailable here.' : s.kind === 'cure' ? 'Special Universal Pill (small) is unavailable here.' : s.kind === 'vigor' ? 'The selected vigor potion size is unavailable here; choose another size in Supplies.' : 'X-Large ' + s.kind.toUpperCase() + ' potion is unavailable here.');
+    if (!offer || !(offer.maxStack > 0)) {
+      // Pet food is a convenience here: a merchant without it must not stop the town trip.
+      if (s.kind === 'hgp') { t.buySkipped.push(s.refObjId); this.message = 'This merchant does not sell HGP recovery potions; skipped them.'; UI.toast(this.message, 'warn', 6000); return; }
+      return this.fail(s.kind === 'scroll' ? 'Selected scroll is unavailable here.' : s.kind === 'cure' ? 'Special Universal Pill (small) is unavailable here.' : s.kind === 'vigor' ? 'The selected vigor potion size is unavailable here; choose another size in Supplies.' : 'X-Large ' + s.kind.toUpperCase() + ' potion is unavailable here.');
+    }
     const before = Restock.count(s.refObjId), room = World.items().filter(i => i.refObjId === s.refObjId).reduce((n, i) => n + Math.max(0, offer.maxStack - (i.quantity ?? 1)), 0);
     let quantity = Math.min(s.target - before, offer.purchaseLimit ?? offer.maxStack, 65535, room + Math.max(0, World.freeBagSlots() - 1) * offer.maxStack);
     if (quantity < 1) return this.fail('Not enough bag space for refill and a spare transfer slot.');
@@ -11436,17 +11443,27 @@ const Setup = {
 };
 
 
-// Automatic HP recovery kits for your attack and pickup pets. Kits are companion items (type 3/3/1/4): the game
-// needs the pet named in the item-use command, so this sends it explicitly. Player potions always go first, kits
-// are never resent until the previous one is seen to be consumed, and a pet is left alone — 30 s when a kit is
-// not seen consumed, 5 min when confirmed kits never raise its HP — instead of burning kits on a bad HP reading.
+// Automatic HP recovery kits for your attack and pickup pets, and HGP recovery potions (pet food) for the attack
+// pet's satiety. Both are companion items (types 3/3/1/4 and 3/3/1/9): the game needs the pet named in the
+// item-use command, so this sends it explicitly. Player potions always go first, nothing is resent until the
+// previous one is seen to be consumed, and a pet is left alone — 30 s when an item is not seen consumed, 5 min
+// when confirmed kits never raise its HP — instead of burning supplies on a bad HP reading.
 const PetPotion = {
-  maxHp: null, loading: null, retryAt: 0, pending: null, settled: null, blocked: new Map(), stale: new Map(), lastAt: -Infinity, message: 'Pet potions off.',
+  maxHp: null, loading: null, retryAt: 0, pending: null, blocked: new Map(), stale: new Map(), lastAt: -Infinity,
+  feedPending: null, feedBlocked: new Map(), feedLastAt: -Infinity, message: 'Pet potions off.',
   cfg() { return Settings.profile.potion.petHp; },
-  reset() { this.pending = null; this.settled = null; this.blocked.clear(); this.stale.clear(); this.lastAt = -Infinity; this.message = this.cfg().on ? 'Waiting for a pet.' : 'Pet potions off.'; },
+  hgpCfg() { return Settings.profile.potion.petHgp; },
+  reset() {
+    this.pending = null; this.blocked.clear(); this.stale.clear(); this.lastAt = -Infinity;
+    this.feedPending = null; this.feedBlocked.clear(); this.feedLastAt = -Infinity;
+    this.message = this.cfg().on || this.hgpCfg().on ? 'Waiting for a pet.' : 'Pet potions off.';
+  },
   kits() { return World.items().filter(i => Number.isInteger(i.typeFlags) && ItemType.potionCategory(i.typeFlags) === 4 && (i.quantity ?? 1) > 0); },
   total(ref) { return this.kits().filter(i => i.refObjId === ref).reduce((n, i) => n + (i.quantity ?? 1), 0); },
   heal(item) { return Number(item.tooltip?.fields?.itemParam1_29c) || 0; },
+  foods() { return World.items().filter(i => Number.isInteger(i.typeFlags) && ItemType.potionCategory(i.typeFlags) === 9 && (i.quantity ?? 1) > 0); },
+  foodTotal(ref) { return this.foods().filter(i => i.refObjId === ref).reduce((n, i) => n + (i.quantity ?? 1), 0); },
+  foodPct(item) { return Number(item.tooltip?.fields?.itemParam1_29c) || 0; },
   // The catalogue is the only maximum source, exactly like the game's own pet window; vitals rows for a COS
   // never carry a maintained maximum.
   async load() {
@@ -11477,47 +11494,57 @@ const PetPotion = {
     const rec = World.gp?.cosRecords?.find(r => r && r.gid === gid);
     return Number.isFinite(rec?.hp) ? rec.hp : undefined;
   },
+  // Satiety runs 0..10000 and only attack pets (band 3) carry it; the record is the live source, so no
+  // catalogue is needed here.
+  hungerPets() {
+    const out = [];
+    for (const rec of World.gp?.cosRecords || []) {
+      if (!rec || rec.dead || !(rec.hp > 0) || rec.band !== 3 || !Number.isInteger(rec.gid) || rec.gid <= 0 || !Number.isFinite(rec.satiety)) continue;
+      out.push({ gid: rec.gid, satiety: rec.satiety, pct: rec.satiety / 100 });
+    }
+    return out;
+  },
   // Smallest kit that covers the missing HP, otherwise the biggest one.
   pick(missing) {
     const kits = this.kits().sort((a, b) => this.heal(a) - this.heal(b));
     return kits.find(k => this.heal(k) >= missing) || kits[kits.length - 1] || null;
   },
+  // Smallest food whose percentage covers the missing satiety, otherwise the biggest one.
+  pickFood(missing) {
+    const foods = this.foods().sort((a, b) => this.foodPct(a) - this.foodPct(b));
+    return foods.find(f => this.foodPct(f) * 100 >= missing) || foods[foods.length - 1] || null;
+  },
   tick() {
-    const c = this.cfg(), P = Settings.profile.potion;
-    if (!c.on || !P.enabled) { this.pending = null; this.settled = null; this.message = 'Pet potions off.'; return false; }
+    const P = Settings.profile.potion;
+    if ((!this.cfg().on && !this.hgpCfg().on) || !P.enabled) { this.pending = null; this.feedPending = null; this.message = 'Pet potions off.'; return false; }
     if (!World.inWorld() || World.isDead()) return false;
     this.load();
+    const healed = this.healTick();
+    if (healed || this.pending) return healed;
+    return this.feedTick();
+  },
+  healTick() {
+    const c = this.cfg();
+    if (!c.on) return false;
     const p = this.pending;
     if (p) {
       if (this.total(p.ref) < p.before) {
         Activity.emit({ category: 'potion', code: 'pet-kit-consumed', text: 'Pet recovery kit consumption observed in inventory.', outcome: 'confirmed', details: { quantity: 1 } });
         this.pending = null;
-        // The stack shrinking and the HP update (0x33A6) are separate messages, so the heal can land a
-        // snapshot later: hold the flat judgement for a short grace before counting it.
-        this.settled = { gid: p.gid, hp: p.hp, at: now() };
+        // The server consumes a kit even on a full pet, so a confirmed kit whose HP does not move means the
+        // reading is wrong; three in a row rest the pet instead of draining the stack.
+        const flat = this.petHp(p.gid), mark = this.stale.get(p.gid);
+        if (Number.isFinite(flat) && flat === p.hp) {
+          const count = (mark?.count ?? 0) + 1;
+          if (count >= 3) { this.blocked.set(p.gid, now() + 300000); this.stale.delete(p.gid); this.message = 'Confirmed kits never raise this pet HP; waiting 5 min.'; return false; }
+          this.stale.set(p.gid, { count });
+        }
+        else this.stale.delete(p.gid);
       }
       else if (now() - p.at > 5000) { this.pending = null; this.blocked.set(p.gid, now() + 30000); this.message = 'Pet recovery kit consumption unconfirmed; waiting 30 s.'; }
       else return false;
     }
-    if (this.settled) {
-      const s = this.settled, flat = this.petHp(s.gid);
-      if (!Number.isFinite(flat) || flat !== s.hp) { this.stale.delete(s.gid); this.settled = null; }
-      else if (now() - s.at > 1500) {
-        this.settled = null;
-        // The server consumes a kit even on a full pet, so a confirmed kit whose HP never moved means the
-        // reading is wrong; three in a row rest the pet instead of draining the stack.
-        const count = (this.stale.get(s.gid)?.count ?? 0) + 1;
-        if (count >= 3) {
-          this.blocked.set(s.gid, now() + 300000); this.stale.delete(s.gid);
-          this.message = 'Confirmed kits never raise this pet HP; waiting 5 min.';
-          Activity.emit({ category: 'potion', code: 'pet-kit-flat', text: 'Three confirmed kits left the pet HP untouched; the HP reading looks wrong, resting the pet 5 min.', outcome: 'refused', details: { gid: s.gid, hp: flat } });
-          return false;
-        }
-        this.stale.set(s.gid, { count });
-      }
-      else return false;
-    }
-    if (World.gp.inventoryPending || now() - this.lastAt < 1500 || now() - Potion.lastUse < P.delayMs) return false;
+    if (World.gp.inventoryPending || now() - this.lastAt < 1500 || now() - Potion.lastUse < Settings.profile.potion.delayMs) return false;
     const known = this.pets(), pets = known.filter(x => (this.blocked.get(x.gid) ?? 0) <= now()).sort((a, b) => a.pct - b.pct);
     for (const x of known) if (x.pct > c.pct) this.stale.delete(x.gid);
     if (known.length && !pets.length) return false;
@@ -11529,6 +11556,33 @@ const PetPotion = {
     if (!Cmd.itemUseOnPet(kit.slot, pet.gid)) return false;
     this.pending = { ref: kit.refObjId, before: this.total(kit.refObjId), gid: pet.gid, hp: pet.hp, at: now() }; this.lastAt = now();
     this.message = 'Recovery kit requested for the pet at ' + Math.round(pet.pct) + '% HP; waiting for consumption confirmation.';
+    return true;
+  },
+  // HGP recovery potions (pet food) restore a percentage of the 10000 satiety gauge; the server refuses — without
+  // consuming — above 99%, so the setting stays at or below 95. The gauge is exact, so no flat-reading guard is
+  // needed: an unseen consumption already rests the pet for 30 s.
+  feedTick() {
+    const c = this.hgpCfg();
+    if (!c.on) return false;
+    const p = this.feedPending;
+    if (p) {
+      if (this.foodTotal(p.ref) < p.before) {
+        Activity.emit({ category: 'potion', code: 'pet-food-consumed', text: 'Pet HGP potion consumption observed in inventory.', outcome: 'confirmed', details: { quantity: 1 } });
+        this.feedPending = null;
+      }
+      else if (now() - p.at > 5000) { this.feedPending = null; this.feedBlocked.set(p.gid, now() + 30000); this.message = 'Pet HGP potion consumption unconfirmed; waiting 30 s.'; }
+      else return false;
+    }
+    if (World.gp.inventoryPending || now() - this.feedLastAt < 1500 || now() - Potion.lastUse < Settings.profile.potion.delayMs) return false;
+    const pets = this.hungerPets().filter(x => (this.feedBlocked.get(x.gid) ?? 0) <= now()).sort((a, b) => a.pct - b.pct);
+    if (!pets.length) return false;
+    const pet = pets[0];
+    if (pet.pct > c.pct) return false;
+    const food = this.pickFood(10000 - pet.satiety);
+    if (!food) { this.message = 'Pet is hungry but no HGP recovery potions in the bag.'; return false; }
+    if (!Cmd.itemUseOnPet(food.slot, pet.gid)) return false;
+    this.feedPending = { ref: food.refObjId, before: this.foodTotal(food.refObjId), gid: pet.gid, at: now() }; this.feedLastAt = now();
+    this.message = 'HGP recovery potion requested for the pet at ' + Math.round(pet.pct) + '% satiety; waiting for consumption confirmation.';
     return true;
   },
 };
@@ -15465,7 +15519,9 @@ const UI = {
         this.check('Use cure pills', () => P().cure.on, v => P().cure.on = v),
         this.check('Use recovery kits on my pets', () => P().petHp.on, v => { P().petHp.on = v; PetPotion.reset(); }),
         this.number('Pet HP below (%)', () => P().petHp.pct, v => P().petHp.pct = v, 5, 95),
-        el('p', 'Pets: when an attack or pickup pet drops below this HP, one recovery kit (the smallest that covers the missing HP) is used on it. Your own potions always go first; each kit must be seen consumed before the next. Vigor potions need no setting beyond the two thresholds above; they are used only when the HP and MP potions are not enough.', 'muted'));
+        this.check('Use HGP recovery potions on my pet', () => P().petHgp.on, v => { P().petHgp.on = v; PetPotion.reset(); }),
+        this.number('Pet HGP below (%)', () => P().petHgp.pct, v => P().petHgp.pct = v, 5, 95),
+        el('p', 'Pets: when an attack or pickup pet drops below this HP, one recovery kit (the smallest that covers the missing HP) is used on it. When the attack pet\'s HGP (satiety) drops below the second number, one HGP recovery potion is fed to it. Your own potions always go first; each item must be seen consumed before the next. Vigor potions need no setting beyond the two thresholds above; they are used only when the HP and MP potions are not enough.', 'muted'));
       this.petPotionNote = el('p', PetPotion.message, 'muted pet-note'); this.petPotionNote.title = PetPotion.message; pots.append(this.petPotionNote);
       host.append(pots);
   },
@@ -15490,7 +15546,12 @@ const UI = {
         this.check('Buy abnormal pills (best)', () => C().cure.on, v => C().cure.on = v),
         this.number('Pills low stock ≤', () => C().cure.low, v => C().cure.low = v, 0, 9999),
         this.number('Pills refill to', () => C().cure.target, v => C().cure.target = v, 1, 10000),
-        el('p', 'Buys only Special Universal Pill (small), the strongest universal cure. No cheaper substitute. Uses the same refill trips as HP/MP. Use cure pills above controls automatic use.', 'muted'));
+        el('p', 'Buys only Special Universal Pill (small), the strongest universal cure. No cheaper substitute. Uses the same refill trips as HP/MP. Use cure pills above controls automatic use.', 'muted'),
+        this.check('Buy HGP recovery potions', () => C().hgp.on, v => C().hgp.on = v),
+        this.select('HGP potion', () => [[0, 'Choose the merchant\'s pet food'], ...C().offers.filter(o => o.kind === 'hgp').map(o => [o.refObjId, o.name])], () => C().hgp.refObjId, v => C().hgp.refObjId = Number(v)),
+        this.number('HGP low stock ≤', () => C().hgp.low, v => C().hgp.low = v, 0, 9999),
+        this.number('HGP refill to', () => C().hgp.target, v => C().hgp.target = v, 1, 10000),
+        el('p', 'Pet food for the attack pet\'s HGP. Pick the pet food the recorded merchant sells; on a refill trip it is bought like the potions, and a merchant without it skips it with a notice. Feeding is set under Automatic potion use.', 'muted'));
       shop.append(el('p', 'Refill targets are total potion counts, including what is already in your bag. Used for low-supply, full-bag and revival trips, and walking-route restock when the town cycle is off. Set MP refill to 1000 for 1,000 MP potions. Changes apply to the next trip.', 'muted'));
       host.append(shop);
   },
