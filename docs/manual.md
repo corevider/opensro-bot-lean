@@ -45,6 +45,8 @@ The **Items** page lists every item in the game with sBot-style filters under **
 
 **Combat → Buffs & imbue → Weapons and shield** sets your **Primary weapon**, **Secondary weapon** and **Shield**, picked from what you wear or carry. A choice stays when you wear the item, when it is in the warehouse or the pet, and when alchemy changes its plus or stones. Chosen gear is never sold, stored, dropped, moved to the pet or offered in your stall, whatever its item rule or stall price. **Balance free slots with the pickup pet** is under **Loot → Bag and pet space**.
 
+While hunting, the primary weapon is the combat weapon. When something else is worn (after a reconnect or a manual change), the bot puts it back on, with the chosen shield when it is one-handed; a two-handed primary keeps the worn arrows or bolts. Under each buff, **Gear for <skill>** can be **Primary weapon**, **Secondary weapon** or **Shield (with a one-handed weapon)**: the bot wears it, casts the buff, then goes back to the primary weapon. Automatic buff swaps try the secondary weapon first, then the primary. A primary weapon or shield the game will not equip is not tried again until you pick it again, and the gear worn before goes back on; any other refused move waits five minutes. Hunting goes on either way. Without a primary weapon chosen, whatever is worn stays the combat gear.
+
 ## Vigor and pet potions
 
 Under **Supplies → Automatic potion use**:
