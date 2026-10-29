@@ -4,10 +4,12 @@
 // registers an offer while the stall is still closed, stall-open {open, network} opens it for business and can
 // list it on the stall network, stall-close tears it down. World.gp.stall is undefined while no stall is open,
 // otherwise { phase: 'none'|'naming'|'owner'|'visitor', owner, title, open, offers: [{slot, item, bagSlot,
-// quantity, price}], visitors }. A sale shows as the offer disappearing while gold rises; a dispatch is never
-// proof, every step waits for its state change and is never resent.
+// quantity, price}], visitors }. A sale shows as the offer disappearing and then gold rising (0x3260 reports the
+// sold slot, the gold comes on its own update); a dispatch is never proof, every step waits for its state change
+// and is never resent.
 const STALL_MAX_OFFERS = 10;
 const STALL_STEP_TIMEOUT_MS = 15000;
+const STALL_SALE_WAIT_MS = 30000;
 const Stall = {
   run: null, pending: null, message: 'Idle. Price items on this page, stand in town and open the stall.',
   started: false,
@@ -54,7 +56,7 @@ const Stall = {
     const list = this.candidates();
     if (!list.length) return reject('No priced bag items to offer. Give items a price on this page first.');
     this.run = { phase: 'name', character: World.charName, config: JSON.stringify(c), manualAt: Manual.lastAt,
-      skip: new Set(), refusals: 0, sold: 0, earned: 0n, openedAt: 0, lastGold: toBigInt(gp.progression?.gold), offersAt: null };
+      skip: new Set(), refusals: 0, sold: 0, earned: 0n, openedAt: 0, lastGold: toBigInt(gp.progression?.gold), offersAt: null, vanished: [] };
     this.pending = null;
     this.message = 'Opening the stall.';
     Activity.emit({ category: 'stall', code: 'stall-started', text: 'Stall session started: offering ' + list.length + ' priced item' + (list.length === 1 ? '' : 's') + '.', outcome: 'requested' });
@@ -63,8 +65,8 @@ const Stall = {
   // so a world reset never sends a command the worker would refuse); `quiet` drops it without any command.
   stop(reason = 'Stall session stopped.', quiet = false) {
     const r = this.run; this.run = null; this.pending = null;
-    this.message = reason;
     if (!r) return;
+    this.message = reason;
     if (r.phase === 'done') return;
     Activity.emit({ category: 'stall', code: 'stall-stopped', level: 'warn', text: reason, outcome: 'cancelled' });
     if (quiet) return;
@@ -123,27 +125,34 @@ const Stall = {
     this.pending = { kind, at: now(), ...extra };
     return true;
   },
-  // A sale: an offer disappears while gold rises. Nothing else moves gold while the session owns the character,
-  // so an offer vanishing without a gold gain is not claimed as a sale.
+  // A sale: an offer disappears, then gold rises. The game reports the two separately, so a vanished offer waits
+  // up to STALL_SALE_WAIT_MS for gold above what the character had before it vanished. Nothing else moves gold
+  // while the session owns the character; an offer vanishing without a gold gain is not claimed as a sale.
   observeSales(r, gp) {
-    const stall = gp.stall;
-    if (!stall || stall.phase !== 'owner') return;
-    const gold = toBigInt(gp.progression?.gold);
-    if (r.offersAt === null) { r.offersAt = stall.offers.map(o => ({ ...o })); r.lastGold = gold; return; }
-    const before = r.offersAt, after = stall.offers;
-    for (const old of before) {
-      const kept = after.find(o => o.slot === old.slot);
-      const quantity = old.quantity - (kept ? Math.min(kept.quantity, old.quantity) : 0);
-      if (quantity <= 0 || gold <= r.lastGold) continue;
-      const value = BigInt(old.price) * BigInt(quantity);
-      r.sold += quantity; r.earned += value;
-      r.saleNoteAt = now();
-      this.message = 'Sold ' + quantity + ' × ' + (old.item?.name || Items.name(old.item?.refObjId) || 'item') + ' for ' + value.toLocaleString('en-US') + ' gold.';
-      Activity.emit({ category: 'stall', code: 'stall-sale', text: this.message, outcome: 'confirmed',
-        details: { refObjId: old.item?.refObjId, quantity, price: old.price, slot: old.slot } });
+    const stall = gp.stall, gold = toBigInt(gp.progression?.gold);
+    if (stall?.phase === 'owner') {
+      if (r.offersAt === null) { r.offersAt = stall.offers.map(o => ({ ...o })); r.lastGold = gold; return; }
+      const after = stall.offers;
+      for (const old of r.offersAt) {
+        const kept = after.find(o => o.slot === old.slot);
+        const quantity = old.quantity - (kept ? Math.min(kept.quantity, old.quantity) : 0);
+        if (quantity > 0) r.vanished.push({ old, quantity, at: now(), gold: r.lastGold });
+      }
+      r.offersAt = after.map(o => ({ ...o }));
     }
-    r.offersAt = after.map(o => ({ ...o }));
+    r.vanished = r.vanished.filter(sale => {
+      if (gold > sale.gold) { this.claimSale(r, sale); return false; }
+      return now() - sale.at < STALL_SALE_WAIT_MS;
+    });
     r.lastGold = gold;
+  },
+  claimSale(r, { old, quantity }) {
+    const value = BigInt(old.price) * BigInt(quantity);
+    r.sold += quantity; r.earned += value;
+    r.saleNoteAt = now();
+    this.message = 'Sold ' + quantity + ' × ' + (old.item?.name || Items.name(old.item?.refObjId) || 'item') + ' for ' + value.toLocaleString('en-US') + ' gold.';
+    Activity.emit({ category: 'stall', code: 'stall-sale', text: this.message, outcome: 'confirmed',
+      details: { refObjId: old.item?.refObjId, quantity, price: old.price, slot: old.slot } });
   },
   watchSelling(r, gp) {
     this.observeSales(r, gp);
@@ -212,6 +221,7 @@ const Stall = {
     }
     if (r.phase === 'selling') { this.watchSelling(r, gp); return true; }
     if (r.phase === 'close') {
+      this.observeSales(r, gp);
       if (!stall) return this.finish('Stall closed. Sold ' + r.sold + ' item' + (r.sold === 1 ? '' : 's') + ' for ' + r.earned.toLocaleString('en-US') + ' gold.'), true;
       this.message = 'Stall: closing.';
       this.send('close', { kind: 'stall-close' }, 'close the stall');
@@ -230,7 +240,15 @@ const Stall = {
     if (this.started) return; this.started = true;
     // Any manual native gameplay command can interfere with the stall; our own Cmd.raw bypasses these observers.
     Hook.observers.push(command => { if (command.kind === 'gameplay' && this.run) this.stop('Stall stopped by manual game control.'); });
-    bus.on('game-error', text => { if (this.run && /stall|inventory/i.test(String(text))) this.stop('Stall stopped after a game refusal; wait for the state to settle.'); });
+    // A refused offer skips that item, as an unconfirmed one does; any other stall refusal ends the session. Potion
+    // and other inventory refusals are not ours: the controller keeps potions running while the stall is open.
+    bus.on('game-error', text => {
+      if (!this.run) return;
+      if (this.pending?.kind === 'add') {
+        this.run.skip.add(this.pending.bagSlot); this.run.refusals++; this.pending = null;
+        this.message = 'Stall: the game refused one item; skipping it.';
+      } else if (/stall/i.test(String(text))) this.stop('Stall stopped after a game refusal; wait for the state to settle.');
+    });
     // A world reset clears the stall server-side too; drop the session without sending anything.
     bus.on('reset', () => this.stop('Stall stopped after world reset.', true));
   },
@@ -269,7 +287,7 @@ const Stall = {
     const unnamed = [...new Map(World.items().filter(i => this.price(i.refObjId) === 0 && i.tooltip?.fields?.canSell !== 0).map(i => [i.refObjId, i])).values()];
     if (unnamed.length) prices.append(UI.select('Add a bag item to sell', () => [[0, 'Choose an item'], ...unnamed.map(i => [i.refObjId, (i.name || Items.name(i.refObjId)) + ' ×' + (i.quantity ?? 1)])],
       () => 0, v => { const id = Number(v); if (id) { this.setPrice(id, 100); UI.draw(); } }));
-    prices.append(el('p', 'Prices are per exact item and saved with this character, so the same drop sells at the same price on the next stall. A new entry starts at 100 gold; change it to what the item is worth. Items the merchant cannot sell are not offered. Items already in a stall you keep open in the game are left alone.', 'muted'));
+    prices.append(el('p', 'Prices are per exact item and saved with this character, so the same drop sells at the same price on the next stall. A new entry starts at 100 gold; change it to what the item is worth. Items the merchant cannot sell are not offered.', 'muted'));
     UI.pane.append(prices);
   },
   refresh() {

@@ -6015,6 +6015,47 @@ test('a confirmed sale is reported with its gold value', () => {
   assert.equal(f.Stall.run, null);
   assert.ok(f.Stall.message.includes('Sold 20 items for 3,000 gold.'), f.Stall.message);
 });
+test('a sale whose gold arrives after the offer disappears still counts; an offer with no gold within 30 s does not', () => {
+  const f = stallFixture(); stallBag(f);
+  f.Settings.profile.stall.prices = { 62: 150, 63: 4000 };
+  f.World.gp.progression.gold = '100000';
+  f.Stall.start(); stallDrive(f, 40);
+  assert.equal(f.Stall.run.phase, 'selling');
+  // The game reports the sold slot first and the gold on a later update.
+  f.World.gp.stall.offers = f.World.gp.stall.offers.filter(o => o.bagSlot !== 13);
+  f.advance(400); f.Controller.tick();
+  assert.equal(f.Stall.run.sold, 0, 'no gold yet');
+  f.World.gp.progression.gold = '103000';
+  f.advance(400); f.Controller.tick();
+  assert.equal(f.Stall.run.sold, 20, 'the gold a tick later confirms the sale');
+  assert.equal(f.Stall.run.earned, 3000n);
+  // An offer that vanishes and never brings gold is dropped after 30 s, not claimed by later gold.
+  f.World.gp.stall.offers = [];
+  f.Settings.profile.stall.closeWhenEmpty = false;
+  for (let i = 0; i < 80; i++) { f.advance(400); f.Controller.tick(); }
+  f.World.gp.progression.gold = '200000';
+  f.advance(400); f.Controller.tick();
+  assert.equal(f.Stall.run, null, 'a settings change still ends the session');
+});
+test('a potion or inventory refusal leaves the stall open; a refused offer skips only that item', () => {
+  const f = stallFixture(); stallBag(f);
+  f.Settings.profile.stall.prices = { 62: 150, 63: 4000 };
+  f.Stall.start();
+  // The game refuses the first offer outright.
+  for (let i = 0; i < 40 && f.Stall.run; i++) {
+    f.advance(400); f.Controller.tick();
+    const c = f.commands.at(-1);
+    if (c?.kind === 'stall-add' && c.bagSlot === 13 && !c.__done) { c.__done = true; f.bus.emit('game-error', 'Item cannot be sold'); }
+    else stallRespond(f);
+  }
+  assert.equal(f.Stall.run?.phase, 'selling', 'status: ' + f.Stall.message);
+  assert.deepEqual(f.World.gp.stall.offers.map(o => o.bagSlot), [14], 'the other item is still offered');
+  f.bus.emit('game-error', 'Inventory full: cannot use the potion');
+  f.advance(400); f.Controller.tick();
+  assert.equal(f.Stall.run?.phase, 'selling', 'a potion refusal is not the stall refusal');
+  f.bus.emit('game-error', 'Stall operation refused');
+  assert.equal(f.Stall.run, null, 'a stall refusal still stops it');
+});
 test('an unconfirmed stall-add is skipped and never resent; the rest of the stall still opens', () => {
   const f = stallFixture(); stallBag(f);
   f.Settings.profile.stall.prices = { 62: 150, 63: 4000 };
