@@ -4,6 +4,8 @@ Hunt.start = function (...args) {
   if (BuffGear.run || BuffGear.recovery) return UI.toast('Restore or review combat gear before hunting.', 'warn');
   if (Alchemy.run || Alchemy.pending) return UI.toast('Stop alchemy and wait for its result before hunting.', 'warn');
   if (Trade.run) return UI.toast('Stop auto trade before hunting.', 'warn');
+  if (Stall.run) return UI.toast('Stop the stall session before hunting.', 'warn');
+  if (World.gp?.stall?.phase && World.gp.stall.phase !== 'none') return UI.toast('Close the stall before hunting.', 'warn');
   Lure.reset();
   return startHunting.apply(this, args);
 };
@@ -104,6 +106,7 @@ function stopAll() {
   Town.record('stop');
   Alchemy.stop();
   Trade.cancel();
+  Stall.stop();
   BuffGear.cancel();
   const townActive = !!Town.trip;
   Town.cancel();
@@ -210,6 +213,7 @@ const Controller = {
         if (BuffGear.tick()) { this.mode = 'buff gear'; return; }
       }
       if (Alchemy.run || Alchemy.pending) { if (World.inWorld()) Party.tick(); this.mode = 'alchemy'; return; }
+      if (Stall.run) { if (World.inWorld()) { Party.tick(); Potion.tick(); } Stall.tick(); this.mode = 'stall'; return; }
       if (World.inWorld() && World.isDead() && Hunt.running) {
         Town.cancel(); Resurrect.cancelTrip(); Resurrect.holdUntil = 0;
         Party.acceptResurrection();

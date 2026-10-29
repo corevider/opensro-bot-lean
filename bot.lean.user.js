@@ -187,6 +187,7 @@ const NOTES_URL = 'https://nixxane.github.io/opensro-bot-lean-site/#patch-notes'
 const CLASS_KEYS = ['normal', 'champion', 'giant', 'party', 'elite', 'unique'];
 const DEFAULT_PROFILE = {
   items: { rules: {}, balance: false, gear: { primaryWeapon: null, primaryShield: null, secondaryWeapon: null, secondaryShield: null } },
+  stall: { title: '', greeting: '', network: true, closeWhenEmpty: true, prices: {} },
   alchemy: { target: 3, limit: 20, elixir: 0, powder: false, use: { luck: false, steady: false, immortal: false, astral: false }, stones: { luck: 1, steady: 1, immortal: 1, astral: 1 }, stoneLimit: 0,
     // The plus from which each helper is used: a failure from +5 up can destroy the item (Steady and Immortal matter from there),
     // Luck and lucky powder help at every plus, and Astral keeps +4 on a failure.
@@ -243,7 +244,7 @@ const DEFAULT_PROFILE = {
 function botProfile(input) {
   const result = deepMerge(DEFAULT_PROFILE, {});
   if (!input || typeof input !== 'object') return result;
-  for (const key of ['macro', 'potion', 'hunt', 'lure', 'wardrobe', 'party', 'alchemy', 'mastery', 'statPoints', 'trace', 'items', 'trade']) {
+  for (const key of ['macro', 'potion', 'hunt', 'lure', 'wardrobe', 'party', 'alchemy', 'mastery', 'statPoints', 'trace', 'items', 'trade', 'stall']) {
     if (!input[key] || typeof input[key] !== 'object') continue;
     for (const field of Object.keys(DEFAULT_PROFILE[key])) {
       if (field in input[key]) result[key][field] = deepMerge(DEFAULT_PROFILE[key][field], input[key][field]);
@@ -7811,6 +7812,305 @@ const Town = {
 };
 
 
+// Auto stall: open the character's own street stall in town and sell bag items at prices you set per item
+// (like sBot's stall). The worker contract, read from the live client: stall-name enters a local naming phase,
+// stall-create {title, greeting} opens the stall (phase 'owner'), stall-add {slot, bagSlot, quantity, price}
+// registers an offer while the stall is still closed, stall-open {open, network} opens it for business and can
+// list it on the stall network, stall-close tears it down. World.gp.stall is undefined while no stall is open,
+// otherwise { phase: 'none'|'naming'|'owner'|'visitor', owner, title, open, offers: [{slot, item, bagSlot,
+// quantity, price}], visitors }. A sale shows as the offer disappearing and then gold rising (0x3260 reports the
+// sold slot, the gold comes on its own update); a dispatch is never proof, every step waits for its state change
+// and is never resent.
+const STALL_MAX_OFFERS = 10;
+const STALL_STEP_TIMEOUT_MS = 15000;
+const STALL_SALE_WAIT_MS = 30000;
+const Stall = {
+  run: null, pending: null, message: 'Idle. Price items on this page, stand in town and open the stall.',
+  started: false,
+  cfg() { return Settings.profile.stall; },
+  // A price entry is the offer rule for that exact item id; 0 or invalid clears it.
+  price(id) { const p = Number(this.cfg().prices?.[id]); return Number.isInteger(p) && p >= 1 && p <= 4294967295 ? p : 0; },
+  setPrice(id, price) {
+    const prices = this.cfg().prices;
+    if (Number.isInteger(price) && price >= 1 && price <= 4294967295) prices[id] = price;
+    else delete prices[id];
+    Settings.saveProfile();
+  },
+  stall() { const s = World.gp?.stall; return s && s.phase !== 'none' ? s : null; },
+  offers() { return this.stall()?.phase === 'owner' ? this.stall().offers || [] : []; },
+  // Bag items with a price that are not already offered or skipped. A price is explicit intent, so the general
+  // loot protections do not apply; stackables offer their whole stack, equipment one piece.
+  candidates(r = this.run) {
+    const offered = new Set(this.offers().map(o => o.bagSlot)), skip = r ? r.skip : new Set();
+    return World.items().filter(i => !offered.has(i.slot) && !skip.has(i.slot) && this.price(i.refObjId) > 0);
+  },
+  // ownStall: the session's own stall is expected mid-run; only a fresh start refuses any open stall.
+  blocked(ownStall = false) {
+    const gp = World.gp;
+    if (!World.inWorld() || !gp || !World.local()) return 'Enter the game world first.';
+    if (World.isDead()) return 'Stall stopped: character died.';
+    if (Alchemy.run || Alchemy.pending) return 'Stop alchemy and wait for its result first.';
+    if (BuffGear.run || BuffGear.recovery) return 'Restore or review combat gear first.';
+    if (Hunt.running || Town.trip || WalkBack.active || Restock.trip || Restock.recording || Resurrect.trip || Controller.resumeAfterRevive) return 'Stop hunting, travel and route recording first.';
+    if (Loot.active) return 'Stop collection and wait for its inventory transaction first.';
+    if (Restock.activeShop() || gp.storage || gp.exchange?.open || gp.exchange?.requesting) return 'Close shop, storage and trade first.';
+    if (!ownStall && gp.stall?.phase && gp.stall.phase !== 'none') return 'Close the open stall first.';
+    if (World.isCasting() || gp.pendingMoves) return 'Wait for casts and movement to finish.';
+    return '';
+  },
+  start() {
+    if (this.run) return;
+    const gp = World.gp, error = this.blocked();
+    const reject = text => { this.message = text; UI.toast(text, 'warn'); };
+    if (error) return reject(error);
+    if (gp.inventoryPending) return reject('Wait for settled inventory state.');
+    if (World.isSitting()) return reject('Stand up first.');
+    if (!Town.detect()) return reject('Stalls open in town only: stand inside one of the known towns.');
+    const c = this.cfg();
+    const list = this.candidates();
+    if (!list.length) return reject('No priced bag items to offer. Give items a price on this page first.');
+    this.run = { phase: 'name', character: World.charName, config: JSON.stringify(c), manualAt: Manual.lastAt,
+      skip: new Set(), refusals: 0, sold: 0, earned: 0n, openedAt: 0, lastGold: toBigInt(gp.progression?.gold), offersAt: null, vanished: [] };
+    this.pending = null;
+    this.message = 'Opening the stall.';
+    Activity.emit({ category: 'stall', code: 'stall-started', text: 'Stall session started: offering ' + list.length + ' priced item' + (list.length === 1 ? '' : 's') + '.', outcome: 'requested' });
+  },
+  // Stop the session. A stall this session opened is closed again (only when the observed state still shows it,
+  // so a world reset never sends a command the worker would refuse); `quiet` drops it without any command.
+  stop(reason = 'Stall session stopped.', quiet = false) {
+    const r = this.run; this.run = null; this.pending = null;
+    if (!r) return;
+    this.message = reason;
+    if (r.phase === 'done') return;
+    Activity.emit({ category: 'stall', code: 'stall-stopped', level: 'warn', text: reason, outcome: 'cancelled' });
+    if (quiet) return;
+    const phase = World.gp?.stall?.phase;
+    if (phase === 'naming') Cmd.raw({ kind: 'stall-name-cancel' }, 'Stall: cancel naming');
+    else if (phase === 'owner' && World.inWorld()) Cmd.raw({ kind: 'stall-close' }, 'Stall: close our stall');
+  },
+  finish(text, code = 'stall-closed') {
+    const r = this.run; this.run = null; this.pending = null;
+    this.message = text;
+    Activity.emit({ category: 'stall', code, text, outcome: 'summary', details: { sold: r.sold, earned: String(r.earned) } });
+  },
+  fail(text) { Log.warn('Stall: ' + text); this.stop(text); },
+  // The next free stall slot, 1-based; the server keeps its own limit and refuses beyond it.
+  freeSlot() {
+    const used = new Set(this.offers().map(o => o.slot));
+    for (let slot = 1; slot <= STALL_MAX_OFFERS; slot++) if (!used.has(slot)) return slot;
+    return 0;
+  },
+  // A confirmed step observes its state change; on timeout the step is skipped (an offer) or fails the session,
+  // and no command is ever resent.
+  confirmPending(gp) {
+    const p = this.pending;
+    if (!p) return true;
+    if (now() - p.at > STALL_STEP_TIMEOUT_MS) {
+      this.pending = null;
+      if (p.kind === 'add') {
+        this.run.skip.add(p.bagSlot); this.run.refusals++;
+        this.message = 'Stall: one item was not registered; skipping it.';
+        return false;
+      }
+      this.fail('Stall: ' + p.kind + ' was not confirmed after 15 s. No repeat command sent.');
+      return false;
+    }
+    if (gp.inventoryPending || now() - p.at < 500) return false;
+    const stall = gp.stall;
+    if (p.kind === 'name') { if (stall?.phase === 'naming') { this.pending = null; return true; } return false; }
+    if (p.kind === 'create') {
+      if (stall?.phase === 'owner' && stall.owner === gp.localGid) { this.pending = null; return true; }
+      return false;
+    }
+    if (p.kind === 'add') {
+      if ((stall?.offers || []).some(o => o.bagSlot === p.bagSlot && o.slot === p.slot)) {
+        this.pending = null; this.run.refusals = 0;
+        Activity.emit({ category: 'stall', code: 'stall-offer', text: 'Stall: ' + p.name + ' registered at ' + p.price.toLocaleString('en-US') + ' gold.', outcome: 'confirmed', details: { refObjId: p.ref, quantity: p.quantity, price: p.price } });
+        return true;
+      }
+      return false;
+    }
+    if (p.kind === 'open') { if (stall?.open) { this.pending = null; return true; } return false; }
+    if (p.kind === 'close') { if (!stall) { this.pending = null; return true; } return false; }
+    return false;
+  },
+  send(kind, command, label, extra = {}) {
+    if (!Cmd.spaced(command.kind) || !Cmd.raw(command, 'Stall: ' + label)) return false;
+    this.pending = { kind, at: now(), ...extra };
+    return true;
+  },
+  // A sale: an offer disappears, then gold rises. The game reports the two separately, so a vanished offer waits
+  // up to STALL_SALE_WAIT_MS for gold above what the character had before it vanished. Nothing else moves gold
+  // while the session owns the character; an offer vanishing without a gold gain is not claimed as a sale.
+  observeSales(r, gp) {
+    const stall = gp.stall, gold = toBigInt(gp.progression?.gold);
+    if (stall?.phase === 'owner') {
+      if (r.offersAt === null) { r.offersAt = stall.offers.map(o => ({ ...o })); r.lastGold = gold; return; }
+      const after = stall.offers;
+      for (const old of r.offersAt) {
+        const kept = after.find(o => o.slot === old.slot);
+        const quantity = old.quantity - (kept ? Math.min(kept.quantity, old.quantity) : 0);
+        if (quantity > 0) r.vanished.push({ old, quantity, at: now(), gold: r.lastGold });
+      }
+      r.offersAt = after.map(o => ({ ...o }));
+    }
+    r.vanished = r.vanished.filter(sale => {
+      if (gold > sale.gold) { this.claimSale(r, sale); return false; }
+      return now() - sale.at < STALL_SALE_WAIT_MS;
+    });
+    r.lastGold = gold;
+  },
+  claimSale(r, { old, quantity }) {
+    const value = BigInt(old.price) * BigInt(quantity);
+    r.sold += quantity; r.earned += value;
+    r.saleNoteAt = now();
+    this.message = 'Sold ' + quantity + ' × ' + (old.item?.name || Items.name(old.item?.refObjId) || 'item') + ' for ' + value.toLocaleString('en-US') + ' gold.';
+    Activity.emit({ category: 'stall', code: 'stall-sale', text: this.message, outcome: 'confirmed',
+      details: { refObjId: old.item?.refObjId, quantity, price: old.price, slot: old.slot } });
+  },
+  watchSelling(r, gp) {
+    this.observeSales(r, gp);
+    const stall = gp.stall;
+    if (!stall || stall.phase !== 'owner') return this.finish('The stall closed. Sold ' + r.sold + ' item' + (r.sold === 1 ? '' : 's') + ' for ' + r.earned.toLocaleString('en-US') + ' gold.');
+    if (r.phase !== 'selling') return;
+    const offers = stall.offers || [];
+    // A sale line stays up briefly instead of being stamped over by the rolling status.
+    if (!r.saleNoteAt || now() - r.saleNoteAt > 5000)
+      this.message = 'Stall open: ' + offers.length + ' offer' + (offers.length === 1 ? '' : 's') + ' left' +
+        (stall.visitors?.length ? ', ' + stall.visitors.length + ' browsing' : '') +
+        (r.sold ? '; sold ' + r.sold + ' for ' + r.earned.toLocaleString('en-US') + ' gold.' : '.');
+    if (!offers.length && this.cfg().closeWhenEmpty) {
+      r.phase = 'close';
+      if (!r.saleNoteAt || now() - r.saleNoteAt > 5000) this.message = 'Everything sold; closing the stall.';
+    }
+  },
+  tick() {
+    const r = this.run, gp = World.gp;
+    if (!r) return false;
+    if (!World.inWorld()) { this.stop('Stall stopped: left the game world.'); return true; }
+    if (!this.confirmPending(gp)) { if (this.run && ['selling', 'close'].includes(this.run.phase)) this.watchSelling(this.run, gp); return true; }
+    if (!this.run) return true; // the confirmation itself may have ended the session
+    const blocked = this.blocked(true);
+    if (blocked || r.character !== World.charName || r.manualAt !== Manual.lastAt || r.config !== JSON.stringify(this.cfg()))
+      return this.fail(blocked || 'Stall stopped: settings, character or manual control changed.'), true;
+    if (World.isDead()) return this.fail('Stall stopped: character died.'), true;
+    const stall = gp.stall;
+    if (stall?.phase === 'visitor') return this.fail('Stall stopped: browsing another stall.'), true;
+    if (r.phase === 'name') {
+      this.message = 'Stall: naming the stall.';
+      if (!stall || stall.phase === 'none') this.send('name', { kind: 'stall-name' }, 'begin naming');
+      else if (stall.phase === 'naming') r.phase = 'create';
+      return true;
+    }
+    if (r.phase === 'create') {
+      this.message = 'Stall: opening the stall.';
+      if (stall?.phase === 'owner' && stall.owner === gp.localGid) {
+        r.phase = 'add';
+        Activity.emit({ category: 'stall', code: 'stall-created', text: 'Stall created: ' + (stall.title || 'unnamed') + '.', outcome: 'confirmed' });
+      }
+      else if (stall?.phase === 'naming') this.send('create', { kind: 'stall-create', title: this.cfg().title || World.charName || 'Stall', greeting: this.cfg().greeting || '' }, 'create the stall');
+      else r.phase = 'name'; // the naming phase was lost; start over
+      return true;
+    }
+    if (r.phase === 'add') {
+      if (r.refusals >= 2) { r.phase = 'open'; return true; }
+      const item = this.nextCandidate(r), slot = this.freeSlot();
+      if (!item || !slot) { r.phase = 'open'; return true; }
+      const price = this.price(item.refObjId), quantity = Math.max(1, item.quantity || 1), name = item.name || Items.name(item.refObjId);
+      this.message = 'Stall: registering ' + name + '.';
+      this.send('add', { kind: 'stall-add', slot, bagSlot: item.slot, quantity, price }, 'offer ' + name,
+        { slot, bagSlot: item.slot, quantity, price, ref: item.refObjId, name });
+      return true;
+    }
+    if (r.phase === 'open') {
+      if (stall?.open) {
+        r.phase = 'selling'; r.openedAt = now(); r.offersAt = null;
+        Activity.emit({ category: 'stall', code: 'stall-opened', text: 'Stall open for business with ' + (stall.offers?.length || 0) + ' offer' + ((stall.offers?.length || 0) === 1 ? '' : 's') + '.', outcome: 'confirmed' });
+        return true;
+      }
+      if (!this.offers().length) return this.fail('Stall: nothing could be registered.');
+      this.message = 'Stall: opening for business.';
+      this.send('open', { kind: 'stall-open', open: true, network: !!this.cfg().network }, 'open for business');
+      return true;
+    }
+    if (r.phase === 'selling') { this.watchSelling(r, gp); return true; }
+    if (r.phase === 'close') {
+      this.observeSales(r, gp);
+      if (!stall) return this.finish('Stall closed. Sold ' + r.sold + ' item' + (r.sold === 1 ? '' : 's') + ' for ' + r.earned.toLocaleString('en-US') + ' gold.'), true;
+      this.message = 'Stall: closing.';
+      this.send('close', { kind: 'stall-close' }, 'close the stall');
+      return true;
+    }
+    return true;
+  },
+  nextCandidate(r) {
+    for (const item of this.candidates(r)) {
+      if (this.offers().some(o => o.bagSlot === item.slot)) continue;
+      return item;
+    }
+    return null;
+  },
+  init() {
+    if (this.started) return; this.started = true;
+    // Any manual native gameplay command can interfere with the stall; our own Cmd.raw bypasses these observers.
+    Hook.observers.push(command => { if (command.kind === 'gameplay' && this.run) this.stop('Stall stopped by manual game control.'); });
+    // A refused offer skips that item, as an unconfirmed one does; any other stall refusal ends the session. Potion
+    // and other inventory refusals are not ours: the controller keeps potions running while the stall is open.
+    bus.on('game-error', text => {
+      if (!this.run) return;
+      if (this.pending?.kind === 'add') {
+        this.run.skip.add(this.pending.bagSlot); this.run.refusals++; this.pending = null;
+        this.message = 'Stall: the game refused one item; skipping it.';
+      } else if (/stall/i.test(String(text))) this.stop('Stall stopped after a game refusal; wait for the state to settle.');
+    });
+    // A world reset clears the stall server-side too; drop the session without sending anything.
+    bus.on('reset', () => this.stop('Stall stopped after world reset.', true));
+  },
+  status() {
+    const r = this.run, stall = this.stall();
+    if (r) return this.message;
+    if (stall?.phase === 'owner') return 'A stall of yours is open in the game; the bot is not managing it.';
+    if (stall?.phase === 'visitor') return 'You are browsing another player\'s stall.';
+    if (stall?.phase === 'naming') return 'A stall is being named in the game.';
+    return this.message;
+  },
+  draw() {
+    const c = () => this.cfg();
+    const setup = UI.group('Stall',
+      UI.text('Stall name', () => c().title, v => c().title = v, 'defaults to your character name'),
+      UI.text('Greeting', () => c().greeting, v => c().greeting = v, 'shown to visitors'),
+      UI.check('List the stall on the stall network', () => c().network, v => c().network = v),
+      UI.check('Close when everything is sold', () => c().closeWhenEmpty, v => c().closeWhenEmpty = v),
+      UI.row(UI.button('Open stall', () => this.start()), UI.button('Stop stall', () => this.stop())),
+      el('p', 'Opens your street stall where you stand and offers every priced bag item from this page. Works in town only, while hunting, travel and alchemy are stopped: the stall keeps the character in place. Each offer sells the whole stack at your price. Sold items are confirmed by the offer disappearing and gold arriving; a step the game does not confirm is skipped, never resent. Stop (or F8) closes a stall this page opened.', 'muted'));
+    UI.stallNote = el('p', this.status(), 'muted'); setup.append(UI.stallNote);
+    UI.pane.append(setup);
+    const prices = UI.group('Items and prices');
+    const entries = Object.entries(c().prices);
+    if (!entries.length) prices.append(el('div', 'No prices set. Add items from your bag below.', 'empty'));
+    for (const [id, price] of entries) {
+      const item = Number(id), name = Items.name(item) || ('#' + item);
+      const inBag = World.items().filter(i => i.refObjId === item).reduce((n, i) => n + (i.quantity ?? 1), 0);
+      const remove = UI.button('×', () => { this.setPrice(item, 0); UI.draw(); });
+      remove.className = 'mini'; remove.setAttribute('aria-label', 'Stop selling ' + name);
+      prices.append(UI.row(
+        el('span', name + (inBag ? ' · ' + inBag + ' in bag' : ' · not in bag'), 'item-name'),
+        UI.number(name + ' price (gold)', () => price, v => this.setPrice(item, v), 1, 4294967295),
+        remove));
+    }
+    const unnamed = [...new Map(World.items().filter(i => this.price(i.refObjId) === 0 && i.tooltip?.fields?.canSell !== 0).map(i => [i.refObjId, i])).values()];
+    if (unnamed.length) prices.append(UI.select('Add a bag item to sell', () => [[0, 'Choose an item'], ...unnamed.map(i => [i.refObjId, (i.name || Items.name(i.refObjId)) + ' ×' + (i.quantity ?? 1)])],
+      () => 0, v => { const id = Number(v); if (id) { this.setPrice(id, 100); UI.draw(); } }));
+    prices.append(el('p', 'Prices are per exact item and saved with this character, so the same drop sells at the same price on the next stall. A new entry starts at 100 gold; change it to what the item is worth. Items the merchant cannot sell are not offered.', 'muted'));
+    UI.pane.append(prices);
+  },
+  refresh() {
+    if (!UI.is('Stall') || !UI.stallNote) return;
+    UI.stallNote.textContent = this.status();
+  },
+};
+
+
 // Generated by gen-travel.py from the client's teleportData.json and npcpos.json. Do not edit by hand.
 const TRAVEL_TABLE = {"nodes":[{"id":1,"refObjId":2094,"name":"SN_ZONE_22001"},{"id":2,"refObjId":2095,"name":"SN_ZONE_22002"},{"id":3,"refObjId":2011,"name":"SN_ZONE_21002","regionId":24993,"x":362.3,"y":72.48,"z":1761.33},{"id":4,"refObjId":2119,"name":"SN_ZONE_21003","regionId":24734,"x":330.34,"y":61.89,"z":1606.66},{"id":5,"refObjId":2031,"name":"SN_ZONE_13002","regionId":25000,"x":1009.54,"y":0.0,"z":1902.64},{"id":6,"refObjId":2034,"name":"SN_ZONE_14022","regionId":25001,"x":1387.17,"y":-0.07,"z":1765.02},{"id":7,"refObjId":2037,"name":"SN_ZONE_14031","regionId":25000,"x":930.07,"y":-0.41,"z":30.66},{"id":8,"refObjId":2035,"name":"SN_ZONE_14025","regionId":25255,"x":334.99,"y":-0.28,"z":34.18},{"id":9,"refObjId":2056,"name":"SN_ZONE_21004","regionId":25761,"x":513.16,"y":89.61,"z":1281.35},{"id":10,"refObjId":2120,"name":"SN_ZONE_21005","regionId":25244,"x":919.72,"y":69.37,"z":366.88},{"id":11,"refObjId":2096,"name":"SN_ZONE_22003"},{"id":12,"refObjId":2046,"name":"SN_ZONE_25022","regionId":24999,"x":647.53,"y":15.92,"z":367.55},{"id":13,"refObjId":2197,"name":"SN_ZONE_25022"},{"id":16,"refObjId":3826,"name":"SN_ZONE_25029_2","regionId":23436,"x":1189.4,"y":-22.49,"z":1324.57},{"id":17,"refObjId":3827,"name":"SN_ZONE_25029_1","regionId":23180,"x":1644.16,"y":-32.06,"z":752.79},{"id":18,"refObjId":3824,"name":"SN_ZONE_25028_2","regionId":23439,"x":323.36,"y":17.89,"z":1747.85},{"id":19,"refObjId":3825,"name":"SN_ZONE_25028_1","regionId":23183,"x":275.92,"y":-25.64,"z":888.49},{"id":20,"refObjId":5901,"name":"SN_ZONE_25031_1","regionId":24185,"x":615.54,"y":2134.74,"z":27.1},{"id":21,"refObjId":5902,"name":"SN_ZONE_25031_2","regionId":22137,"x":851.51,"y":2064.43,"z":1033.44},{"id":22,"refObjId":5910,"name":"SN_ZONE_25033_1","regionId":24438,"x":1120.72,"y":2552.81,"z":313.19},{"id":23,"refObjId":5911,"name":"SN_ZONE_25033_2","regionId":22134,"x":919.97,"y":2545.55,"z":1902.6},{"id":24,"refObjId":19071,"name":"SN_ZONE_25033_3","regionId":24424,"x":1661.63,"y":3892.83,"z":582.68},{"id":25,"refObjId":19074,"name":"SN_ZONE_22004"},{"id":26,"refObjId":7524,"name":"SN_ZONE_21009","regionId":25163,"x":958.05,"y":-155.04,"z":98.97},{"id":27,"refObjId":7522,"name":"SN_ZONE_25022","regionId":26704,"x":652.34,"y":-27.6,"z":1690.06},{"id":28,"refObjId":7526,"name":"SN_ZONE_14043","regionId":27471,"x":1349.25,"y":82.7,"z":412.72},{"id":29,"refObjId":19519,"name":"SN_ZONE_11043","regionId":26959,"x":568.86,"y":83.63,"z":1116.58},{"id":30,"refObjId":19072,"name":"SN_ZONE_14044","regionId":26957,"x":1650.2,"y":83.87,"z":1332.48},{"id":31,"refObjId":7527,"name":"SN_ZONE_21007","regionId":26457,"x":1330.52,"y":26.27,"z":908.75},{"id":32,"refObjId":7528,"name":"SN_ZONE_21008","regionId":25945,"x":1323.33,"y":26.93,"z":999.61},{"id":33,"refObjId":7529,"name":"SN_ZONE_25033_4","regionId":24934,"x":1503.91,"y":626.55,"z":70.9},{"id":34,"refObjId":19075,"name":"SN_ZONE_22005"},{"id":35,"refObjId":7545,"name":"SN_ZONE_25044_03","regionId":27000,"x":1195.11,"y":598.15,"z":1826.79},{"id":36,"refObjId":7546,"name":"SN_ZONE_25044_04","regionId":26232,"x":1489.76,"y":185.39,"z":1842.94},{"id":37,"refObjId":7547,"name":"SN_ZONE_25033_5","regionId":25975,"x":1368.73,"y":324.81,"z":1335.88},{"id":38,"refObjId":7548,"name":"SN_ZONE_25044_01","regionId":26237,"x":158.16,"y":393.61,"z":614.88},{"id":39,"refObjId":7549,"name":"SN_ZONE_25044_02","regionId":25469,"x":183.18,"y":256.87,"z":437.25},{"id":40,"refObjId":23285,"name":"SN_ZONE_40008"},{"id":41,"refObjId":23286,"name":"SN_ZONE_40000"},{"id":42,"refObjId":23287,"name":"SN_ZONE_40009"},{"id":43,"refObjId":22574,"name":"SN_ZONE_41008"},{"id":44,"refObjId":22575,"name":"SN_ZONE_41009"},{"id":45,"refObjId":22576,"name":"SN_ZONE_41010"},{"id":46,"refObjId":22577,"name":"SN_ZONE_41004"},{"id":47,"refObjId":22578,"name":"SN_ZONE_41005"},{"id":48,"refObjId":22579,"name":"SN_ZONE_41006"}],"links":[[1,2,5000],[2,1,5000],[2,11,5000],[3,9,500],[4,10,500],[5,6,10],[5,7,10],[5,8,10],[6,5,10],[6,7,10],[6,8,10],[7,5,10],[7,6,10],[7,8,10],[8,5,10],[8,6,10],[8,7,10],[9,3,500],[10,4,500],[11,2,5000],[11,34,5000],[12,13,0],[16,18,500],[17,19,500],[18,16,500],[19,17,500],[20,22,500],[20,23,500],[20,37,500],[21,22,500],[21,23,500],[22,20,500],[22,21,500],[22,37,500],[23,20,500],[23,21,500],[24,33,500],[25,34,5000],[26,31,500],[26,32,500],[27,13,0],[28,29,10],[28,30,10],[29,28,10],[29,30,10],[30,28,10],[30,29,10],[31,26,500],[32,26,500],[33,24,500],[34,11,5000],[34,25,5000],[35,38,500],[36,39,500],[37,20,500],[37,22,500],[38,35,500],[39,36,500],[40,43,0],[40,44,0],[40,45,0],[41,43,0],[41,44,0],[41,45,0],[42,43,0],[42,44,0],[42,45,0],[43,40,0],[43,41,0],[43,42,0],[44,40,0],[44,41,0],[44,42,0],[45,40,0],[45,41,0],[45,42,0],[46,47,0],[46,48,0],[47,46,0],[47,48,0],[48,1,0],[48,46,0],[48,47,0]]};
 
@@ -8875,6 +9175,8 @@ Hunt.start = function (...args) {
   if (BuffGear.run || BuffGear.recovery) return UI.toast('Restore or review combat gear before hunting.', 'warn');
   if (Alchemy.run || Alchemy.pending) return UI.toast('Stop alchemy and wait for its result before hunting.', 'warn');
   if (Trade.run) return UI.toast('Stop auto trade before hunting.', 'warn');
+  if (Stall.run) return UI.toast('Stop the stall session before hunting.', 'warn');
+  if (World.gp?.stall?.phase && World.gp.stall.phase !== 'none') return UI.toast('Close the stall before hunting.', 'warn');
   Lure.reset();
   return startHunting.apply(this, args);
 };
@@ -8975,6 +9277,7 @@ function stopAll() {
   Town.record('stop');
   Alchemy.stop();
   Trade.cancel();
+  Stall.stop();
   BuffGear.cancel();
   const townActive = !!Town.trip;
   Town.cancel();
@@ -9081,6 +9384,7 @@ const Controller = {
         if (BuffGear.tick()) { this.mode = 'buff gear'; return; }
       }
       if (Alchemy.run || Alchemy.pending) { if (World.inWorld()) Party.tick(); this.mode = 'alchemy'; return; }
+      if (Stall.run) { if (World.inWorld()) { Party.tick(); Potion.tick(); } Stall.tick(); this.mode = 'stall'; return; }
       if (World.inWorld() && World.isDead() && Hunt.running) {
         Town.cancel(); Resurrect.cancelTrip(); Resurrect.holdUntil = 0;
         Party.acceptResurrection();
@@ -14365,7 +14669,7 @@ const UI = {
     // Busy comes from the live trips, not from Controller.mode: that label lags a tick behind (it still says
     // "returning" for up to 100 ms after Stop all ended a walk-back).
     const busy = Town.trip ? 'Town trip' : WalkBack.active ? 'Returning' : Reconnect.active() ? 'Reconnecting' : Restock.trip ? 'Shopping'
-      : Resurrect.trip ? 'Resurrecting' : BuffGear.run ? 'Buff gear' : Trade.run ? 'Trading' : Alchemy.run || Alchemy.pending ? 'Alchemy' : '';
+      : Resurrect.trip ? 'Resurrecting' : BuffGear.run ? 'Buff gear' : Trade.run ? 'Trading' : Alchemy.run || Alchemy.pending ? 'Alchemy' : Stall.run ? 'Stall' : '';
     const label = dead ? 'Dead' : error ? 'Error' : busy || (Hunt.running ? 'Hunting' : 'Stopped');
     // `note` is what only the state can say; the icon falls back to the first wait reason, which the wide window shows below the strip.
     const note = Town.trip ? Town.status() : Travel.active ? Travel.status() : WalkBack.active ? WalkBack.status() : Reconnect.active() && Reconnect.message ? Reconnect.message
@@ -14682,6 +14986,8 @@ const UI = {
       Alchemy.draw();
     } else if (this.current === 'Trade') {
       Trade.draw();
+    } else if (this.current === 'Stall') {
+      Stall.draw();
     } else if (this.current === 'Wardrobe') {
       LeanWardrobe.draw(this.pane);
     } else {
@@ -14693,7 +14999,7 @@ const UI = {
   },
   // ---- Classic layout: an SBot-style frame and tab order (opt-in, screens at least 900 px wide) ----
   // Each tab is a list of the page sections above (title = the heading it gets here); a tab only exists when we have
-  // the feature, so there is no Chat, Union Party, Quest, Stall or Alarms tab yet.
+  // the feature, so there is no Chat, Union Party, Quest or Alarms tab yet.
   classicTabs() {
     return [
       { name: 'Settings', icon: 'action\\icon_cha_helper', pages: ['Supplies', 'Loot', 'Town', 'Combat', 'Settings'], sections: [
@@ -14709,6 +15015,7 @@ const UI = {
         ['partyMembers', 'Current party'], ['partyParty', 'Party settings'], ['partyHeal']] },
       { name: 'Player buffing', icon: 'action\\icon_cha_party', pages: ['Party'], sections: [['partyBuffs', 'Player buffing']] },
       { name: 'Auto alchemy', icon: 'action\\icon_cha_alchemy', pages: ['Alchemy'], draw() { Alchemy.draw(); } },
+      { name: 'Stall', icon: 'action\\icon_cha_shop', pages: ['Stall'], draw() { Stall.draw(); } },
       { name: 'Extra', icon: 'action\\icon_cha_helper', pages: ['Settings'], sections: [
         ['settingsStats'], ['settingsMastery'], ['settingsStatPoints'], ['settingsProfiles'], ['settingsShare'], ['settingsReports'], ['settingsActivity']] },
       { name: 'Map', pages: ['Map'], draw() { LeanMap.draw(this.pane); } },
@@ -14755,7 +15062,7 @@ const UI = {
     const icons = { Items: 'action\\cos_cmd_inventory', Party: 'action\\icon_cha_party', Combat: 'action\\icon_cha_auto_attack', Loot: 'action\\icon_cha_autoget', Supplies: 'action\\icon_cha_recovery', Town: 'item\\etc\\mall_return_scroll',
       Alchemy: 'action\\icon_cha_alchemy', Trade: 'action\\icon_cha_shop', Wardrobe: 'action\\icon_cha_shop', Settings: 'action\\icon_cha_helper', Setup: 'action\\icon_cha_camp' };
     const entries = this.classic ? this.classicTabs().map(t => ({ name: t.name, icon: t.icon, open: () => { this.ctab = t.name; this.draw(); } }))
-      : ['Setup', 'Map', 'Combat', 'Party', 'Loot', 'Items', 'Supplies', 'Town', 'Alchemy', 'Trade', 'Wardrobe', 'Settings'].map(name => ({ name, icon: icons[name], open: () => { this.current = name; this.draw(); } }));
+      : ['Setup', 'Map', 'Combat', 'Party', 'Loot', 'Items', 'Supplies', 'Town', 'Stall', 'Alchemy', 'Trade', 'Wardrobe', 'Settings'].map(name => ({ name, icon: icons[name], open: () => { this.current = name; this.draw(); } }));
     // Page icons are the game's own action-bar icons; they show only in the wide and classic windows' page lists.
     for (const entry of entries) {
       const tab = this.button(entry.name, entry.open);
@@ -15345,7 +15652,7 @@ const UI = {
   },
   update() {
     Stats.sample(); Stats.render();
-    Alchemy.refresh(); Setup.refresh();
+    Alchemy.refresh(); Setup.refresh(); Stall.refresh();
     if (this.is('Combat', 'Buffs & imbue') && BuffGear.note) BuffGear.note.textContent = BuffGear.status();
     Reports.render();
     const diagnosticState = Diagnostics.sample();
@@ -15568,7 +15875,7 @@ observed evidence; an operation ID never implies a server transaction ID.
 ===========================================================================
 */
 const ACTIVITY_LIMIT = { normal: 400, commands: 1000, text: 1000, repeatMs: 1000, captureMs: 600000 };
-const ACTIVITY_CATEGORIES = [ "session", "combat", "movement", "town", "potion", "loot", "party", "buff", "alchemy", "reconnect", "settings", "engine", "assets" ];
+const ACTIVITY_CATEGORIES = [ "session", "combat", "movement", "town", "stall", "potion", "loot", "party", "buff", "alchemy", "reconnect", "settings", "engine", "assets" ];
 const ACTIVITY_DETAIL_KEYS = [ "durationMs", "distance", "attempt", "quantity", "hpPct", "mpPct", "delayMs", "choice", "errorCode", "goldChange", "kills", "deaths", "potions", "items", "revision", "visited", "progressAgeMs", "monsterId", "skillId", "attackingPlayer", "leg", "legs" ];
 const Activity = {
 	commands: [], revision: 0, sequence: 0, session: 0, operation: 0, captureUntil: 0,
@@ -16198,7 +16505,7 @@ UI.showActivityExport = function() {
 
 
 function toggleBot() {
-  if (Alchemy.run || Alchemy.pending || Hunt.running || Town.trip || WalkBack.active || Travel.active || Restock.trip || Resurrect.trip || Controller.resumeAfterRevive) stopAll();
+  if (Alchemy.run || Alchemy.pending || Stall.run || Hunt.running || Town.trip || WalkBack.active || Travel.active || Restock.trip || Resurrect.trip || Controller.resumeAfterRevive) stopAll();
   else if (Restock.recording) UI.toast('Finish or cancel route recording before starting the bot.', 'warn');
   else Hunt.start();
 }
@@ -16229,7 +16536,7 @@ function boot() {
   }, true);
   // Scrolling the panel must not also zoom or move the game camera underneath it.
   W.addEventListener('wheel', e => { if (e.composedPath().includes(UI.root?.host)) e.stopImmediatePropagation(); }, { capture: true, passive: true });
-  Combat.init(); Loot.init(); Alchemy.init(); BuffGear.init();
+  Combat.init(); Loot.init(); Alchemy.init(); BuffGear.init(); Stall.init();
   bus.on('character', name => {
     const key = name ? 'profile:' + name : 'profile:default';
     if (key !== Settings.profileKey) { Town.lastScrollPoint = null; Town.deathPoint = null; stopAll(); Settings.useCharacter(name); }
@@ -16274,7 +16581,7 @@ function boot() {
   }, true);
   Ticker.start(() => Controller.tick(), 100);
   setInterval(() => { Wardrobe.tick(); UI.update(); }, 500);
-  W.SROLean = { version: VERSION, stats: Stats, updates: Updates, diagnostics: Diagnostics, reports: Reports, alchemy: Alchemy, buffGear: BuffGear, world: World, settings: Settings, hunt: Hunt, loot: Loot, speedScroll: SpeedScroll, repairHammer: RepairHammer, resurrect: Resurrect,
+  W.SROLean = { version: VERSION, stats: Stats, updates: Updates, diagnostics: Diagnostics, reports: Reports, alchemy: Alchemy, buffGear: BuffGear, world: World, settings: Settings, hunt: Hunt, loot: Loot, speedScroll: SpeedScroll, repairHammer: RepairHammer, resurrect: Resurrect, stall: Stall,
     restock: Restock, town: Town, walkBack: WalkBack, travel: Travel, antiStuck: AntiStuck, chase: Chase, trap: Trap, autoMastery: AutoMastery, statPoints: StatPoints, share: ProfileShare, trace: Trace, setup: Setup, reconnect: Reconnect, petPotion: PetPotion, navigation: Navigation, route: Route, wardrobe: Wardrobe, wardrobeData: WdData, learned: Learned, controller: Controller, ui: UI, activity: Activity, map: LeanMap, render: RenderControl, support: Support, items: ItemRules, stop: stopAll, log: Log };
   Log.info('NIX ready. F8 starts/stops; F7 folds; F6 or the × minimises and restores; Shift+F7 hides/shows the window.');
 }
