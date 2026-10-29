@@ -7,6 +7,7 @@
 const SUPPORT_TARGET_FRIEND = 16 | 32;
 const SUPPORT_CONFIRM_MS = 6000;  // a buff cast that shows no effect on the member by then is a miss
 const SUPPORT_BACKOFF_MS = 60000; // after two misses in a row that buff on that member waits a minute
+const SUPPORT_WEAPON_BACKOFF_MS = 10 * 60000; // a buff that ends when the weapon changes back waits ten minutes
 const Support = {
   holdUntil: 0, sent: new Map(), misses: new Map(), message: 'Party support off.',
   cfg() { return Settings.profile.party.support; },
@@ -53,6 +54,24 @@ const Support = {
   ready(id) {
     return id && !Combat.blocked?.(id) && Cmd.canCast(id) && Combat.mpOk(id, World.me());
   },
+  // Whether a party buff is still wanted on this member and castable: alive, in range and without it.
+  wants(b, name) {
+    const m = this.members().find(x => x.name === name), id = this.skillOf(b);
+    return !!(this.cfg().enabled && this.ready(id) && m && m.alive && m.inRange && !this.has(m.gid, id));
+  },
+  // Cast a party buff at the member by name (called by a weapon swap once the gear is on).
+  castBuff(b, name) {
+    const m = this.members().find(x => x.name === name), id = this.skillOf(b);
+    if (!m || !this.ready(id) || !this.cast(id, m, `${World.skillName(id)} on ${m.name}`)) return false;
+    this.sent.set(m.name + ':' + b.group, now());
+    return true;
+  },
+  // Whether the member shows the buff at all, and what to do when it ended with the swapped weapon.
+  shows(b, name) { const m = this.members().find(x => x.name === name); return !!m && this.has(m.gid, this.skillOf(b), 0); },
+  ended(b, name) {
+    this.misses.set(name + ':' + b.group, { n: 0, until: now() + SUPPORT_WEAPON_BACKOFF_MS });
+    Log.warn(`Party support: ${World.skillName(this.skillOf(b))} on ${name} ended when the weapon changed back; trying again in ten minutes.`);
+  },
   // Select the member and cast at them; a skill without a target is simply cast.
   cast(id, member, why) {
     const s = World.skill(id), t = now();
@@ -88,8 +107,10 @@ const Support = {
       const low = living.filter(m => m.hpPct < c.heal.pct).sort((a, b) => a.hpPct - b.hpPct)[0];
       if (low) return this.cast(healId, low, `heal ${low.self ? 'myself' : low.name} (${Math.round(low.hpPct)}%)`);
     }
-    // 3. Buffs a member does not have yet. A cast that never shows on the member counts as a miss.
+    // 3. Buffs a member does not have yet. A cast that never shows on the member counts as a miss. A buff that needs
+    // other gear (the weapon its skill needs, or the gear chosen for it) is cast in a weapon swap that comes back after.
     const t = now();
+    let note = '';
     for (const b of c.buffs) {
       const id = this.skillOf(b);
       if (!id || !this.ready(id)) continue;
@@ -107,11 +128,20 @@ const Support = {
           this.misses.set(key, miss);
           if (t < miss.until) continue;
         }
+        const gear = BuffGear.forParty(b, id);
+        if (typeof gear === 'string') { note = gear; break; }
+        if (gear) {
+          const entry = { party: true, id, due: () => this.wants(b, m.name), cast: () => this.castBuff(b, m.name), shows: () => this.shows(b, m.name), ended: () => this.ended(b, m.name) };
+          if (BuffGear.startParty(gear, entry)) { this.message = `${World.skillName(id)} on ${m.name}: changing weapons.`; return true; }
+          // Not now (fighting, a window open): the other buffs, which need no swap, still go out.
+          note = BuffGear.waiting || `${World.skillName(id)} on ${m.name}: waiting to change weapons.`;
+          break;
+        }
         if (this.cast(id, m, `${World.skillName(id)} on ${m.name}`)) { this.sent.set(key, t); return true; }
         return false;
       }
     }
-    this.message = party.some(m => m.alive && !m.inRange) ? 'Some party members are out of view or out of range.' : 'Party is healed and buffed.';
+    this.message = note || (party.some(m => m.alive && !m.inRange) ? 'Some party members are out of view or out of range.' : 'Party is healed and buffed.');
     return false;
   },
 };
