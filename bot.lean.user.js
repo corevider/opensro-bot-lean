@@ -6555,19 +6555,26 @@ const Party = {
   names(text) { return String(text || '').split(/[,;\n]/).map(n => n.trim().toLowerCase()).filter(Boolean); },
   listed(name) { const list = this.names(Settings.profile.party.acceptNames); return !list.length || list.includes(String(name || '').trim().toLowerCase()); },
   leaderName(social) { return social.members.find(m => m && m.id === social.leader)?.name || ''; },
-  // Alt accounts, optional: leave a party whose leader is not the named party leader (the join below then looks for theirs).
+  // Alt accounts, optional: leave a party whose leader is not the named party leader once that character is back at the
+  // hunting spot (the join below then looks for their party). While they are away, after a disconnect say, the party the
+  // game handed to another member stays together.
   leaveWrongParty() {
     const c = Settings.profile.party, leader = String(c.mainName || '').trim().toLowerCase(), social = World.gp?.social;
     if (!c.joinMain || !c.leaveIfNotLeader || !leader || !social || !Array.isArray(social.members) || social.members.length < 2 || !social.leader) return;
     const name = this.leaderName(social).toLowerCase();
     if (!name || name === leader || String(social.localName || '').toLowerCase() === leader) return;
-    if (now() - this.lastLeaveAt < 10000 || !Cmd.spaced('party-leave')) return;
+    if (!this.leaderBack(leader) || now() - this.lastLeaveAt < 10000 || !Cmd.spaced('party-leave')) return;
     if (Cmd.raw({ kind: 'party-leave' }, 'Leave the party of ' + this.leaderName(social) + ' (leader is not ' + c.mainName.trim() + ')')) {
       this.lastLeaveAt = now(); this.joinedKey = '';
       UI.toast('Left the party: its leader is not ' + c.mainName.trim(), 'info', 3000);
     }
   },
   lastLeaveAt: -Infinity,
+  // The named party leader is in view and, with a saved hunting spot, within 30 m of the hunting area.
+  leaderBack(name) {
+    const H = Hunt.cfg();
+    return [...World.ents.values()].some(e => e.kind === 'player' && String(e.name || '').trim().toLowerCase() === name && (!H.center || dist2D(e, H.center) <= H.radius + 300));
+  },
   // Alt accounts: find the main account's party and join it. A party invitation from the main is accepted; otherwise the
   // party-matching board is paged for the main's listing and the bot applies to it (the main's Auto-recruit and
   // Auto-accept answer). Runs only while solo, so it never pulls the character out of another party.
@@ -6579,7 +6586,10 @@ const Party = {
     if (me && me === main) { this.joinMessage = 'This is the main account; nothing to join.'; return; }
     const named = m => String(m?.name || '').toLowerCase();
     if (social.members.some(m => named(m) === main)) { this.joinMessage = 'In ' + c.mainName.trim() + "'s party."; this.joinedKey = ''; this.wantPage = 1; return; }
-    if (social.members.some(m => m && named(m) !== me)) { this.joinMessage = 'In another party; leave it to join ' + c.mainName.trim() + '.'; return; }
+    if (social.members.some(m => m && named(m) !== me)) {
+      this.joinMessage = c.leaveIfNotLeader ? 'In another party; leaving it once ' + c.mainName.trim() + ' is back at the hunting spot.' : 'In another party; leave it to join ' + c.mainName.trim() + '.';
+      return;
+    }
     const inv = social.invitation;
     if (inv && (inv.type === 2 || inv.type === 3) && String(World.ents.get(inv.gid)?.name || '').toLowerCase() === main) {
       const key = inv.type + ':' + inv.gid;
@@ -6596,6 +6606,15 @@ const Party = {
       if (full) { this.joinMessage = c.mainName.trim() + "'s party is full."; return; }
       if (Number.isInteger(level) && (level < row.min || level > row.max)) { this.joinMessage = 'Level ' + level + ' is outside ' + c.mainName.trim() + "'s listing (" + row.min + '-' + row.max + ').'; return; }
       if (now() - this.lastJoinAt < 20000 || !Cmd.spaced('party-match-join')) { this.joinMessage = 'Applied to ' + c.mainName.trim() + "'s party; waiting for the answer."; return; }
+      // The board is a copy of the last page read, and the main's listing gets a new number each time it is registered
+      // again (after a disconnect, or when the party broke up). An application to the old number never reaches the main,
+      // so the page is read again before every new application.
+      if (this.lastJoinAt > this.lastPageAt) {
+        if (Cmd.spaced('party-match-page') && Cmd.raw({ kind: 'party-match-page', page: matching.page || 1 }, 'Read ' + c.mainName.trim() + "'s party listing again")) {
+          this.lastPageAt = now(); this.wantPage = 1; this.scanDoneAt = -Infinity;
+        }
+        this.joinMessage = 'Checking ' + c.mainName.trim() + "'s party listing again."; return;
+      }
       if (Cmd.raw({ kind: 'party-match-join', id: row.id }, 'Join ' + c.mainName.trim() + "'s party")) this.lastJoinAt = now();
       this.joinMessage = 'Applying to ' + c.mainName.trim() + "'s party."; return;
     }
@@ -9802,15 +9821,17 @@ const Controller = {
       Restock.sample();
       Alchemy.tick();
       BuffGear.resume();
+      // Party automation runs in every state, dead or busy included: the game refuses an application to your party
+      // that is not answered within 10 seconds.
+      this.guard('Party', () => Party.tick());
       if (BuffGear.run) {
-        if (World.inWorld()) { Party.tick(); Potion.tick(); }
+        if (World.inWorld()) Potion.tick();
         if (BuffGear.tick()) { this.mode = 'buff gear'; return; }
       }
-      if (Alchemy.run || Alchemy.pending) { if (World.inWorld()) Party.tick(); this.mode = 'alchemy'; return; }
-      if (Stall.run) { if (World.inWorld()) { Party.tick(); Potion.tick(); } Stall.tick(); this.mode = 'stall'; return; }
+      if (Alchemy.run || Alchemy.pending) { this.mode = 'alchemy'; return; }
+      if (Stall.run) { if (World.inWorld()) Potion.tick(); Stall.tick(); this.mode = 'stall'; return; }
       if (World.inWorld() && World.isDead() && Hunt.running) {
         Town.cancel(); Resurrect.cancelTrip(); Resurrect.holdUntil = 0;
-        Party.acceptResurrection();
         Hunt.tick(); this.mode = Hunt.state; return;
       }
       if (World.inWorld() && !World.isDead() && (this.resumeAfterRevive || Hunt.running && Hunt.deathAt)) {
@@ -9820,7 +9841,6 @@ const Controller = {
         } else this.returnAfterRevive();
       }
       if (Town.trip) {
-        if (World.inWorld()) Party.tick();
         // Reserve the first settled item-use window for departure. Continuing
         // alternating potions first can perpetually renew the 350 ms hold.
         if (Town.trip.phase !== 'recall' || !Town.trip.potionWindowReserved || World.isCasting() || World.gp?.inventoryPending) Potion.tick();
@@ -9828,7 +9848,6 @@ const Controller = {
         if (Town.tick()) { this.mode = 'town service'; return; }
       }
       if (!World.inWorld()) { this.mode = 'waiting'; return; }
-      Party.tick();
       Party.resumeTick();
       AutoMastery.tick();
       StatPoints.tick();
@@ -16043,8 +16062,9 @@ const UI = {
         el('p', 'Auto-accept answers only applicants on this list, matched on the exact character name. The list is saved per character. Leave it empty to accept everyone.', 'muted'),
         this.check("Join the party leader's party", () => party().joinMain, v => { party().joinMain = v; Party.reset(); }),
         this.text('Party leader name', () => party().mainName, v => { party().mainName = v; Party.reset(); }, 'exact character name'),
-        this.check('Leave the party if its leader is someone else', () => party().leaveIfNotLeader, v => { party().leaveIfNotLeader = v; Party.reset(); }),
+        this.check("Leave someone else's party when the party leader is back", () => party().leaveIfNotLeader, v => { party().leaveIfNotLeader = v; Party.reset(); }),
         el('p', 'For your other accounts. While you are not in a party, the bot accepts a party invitation from that character, or finds their party listing on the party-matching board and applies to it. The main account needs Auto-recruit and Auto-accept party-matching joins ticked. It also rejoins after a disconnect, once the character is back in the game. Leave this off on the main account.', 'muted'),
+        el('p', 'With the leave option on, a party led by someone else is left only once the party leader is in view near your hunting spot. If the party leader disconnects, the party the game hands to another member stays together until they are back.', 'muted'),
         this.check('Accept resurrection from party members', () => party().acceptRes, v => party().acceptRes = v),
         el('p', 'When you are dead and a party member casts Rebirth on you, the bot answers Yes. Works during hunting and while stopped; resurrection offers from other players are left to you.', 'muted'),
         this.check('Auto-resurrect party members', () => party().autoRes, v => { party().autoRes = v; Resurrect.reset(); }),

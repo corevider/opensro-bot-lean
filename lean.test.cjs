@@ -1496,6 +1496,7 @@ test('auto-accept answers only applicants on the name list, and everyone when th
 test('the alt leaves a party led by someone else only when asked to, and keeps the named leader party', () => {
   const f = joinMainFixture(); const party = f.Settings.profile.party;
   const inParty = leaderName => { f.World.gp.social = { localName: 'AltChar', self: 2, leader: 1, options: 1, members: [{ id: 1, name: leaderName }, { id: 2, name: 'AltChar' }], invitation: null }; };
+  f.World.ents.set(56, { gid: 56, kind: 'player', name: 'MainChar', ...f.Hunt.cfg().center });
   inParty('Stranger'); f.Party.tick(); assert.equal(f.commands.filter(c => c.kind === 'party-leave').length, 0, 'off by default');
   party.leaveIfNotLeader = true; f.Party.tick();
   assert.equal(f.commands.filter(c => c.kind === 'party-leave').length, 1, 'leader is someone else');
@@ -1505,12 +1506,52 @@ test('the alt leaves a party led by someone else only when asked to, and keeps t
   g.Party.tick(); assert.equal(g.commands.filter(c => c.kind === 'party-leave').length, 0, 'the named leader, any letter case');
 });
 
+test('the party the game hands to another member stays together until the party leader is back at the hunting spot', () => {
+  const f = joinMainFixture(); f.Settings.profile.party.leaveIfNotLeader = true;
+  f.World.gp.social = { localName: 'AltChar', self: 2, leader: 1, options: 1, members: [{ id: 1, name: 'OtherAlt' }, { id: 2, name: 'AltChar' }], invitation: null };
+  const leaves = () => f.commands.filter(c => c.kind === 'party-leave').length, H = f.Hunt.cfg();
+  f.Party.tick(); assert.equal(leaves(), 0, 'the main is not in view');
+  assert.match(f.Party.joinMessage, /leaving it once MainChar is back/);
+  const main = { gid: 56, kind: 'player', name: 'mainchar', regionId: H.center.regionId, x: H.center.x + H.radius + 400, y: 0, z: H.center.z };
+  f.World.ents.set(56, main); f.Party.tick(); assert.equal(leaves(), 0, 'in view, but away from the hunting area');
+  main.x = H.center.x + H.radius + 200; f.Party.tick(); assert.equal(leaves(), 1, 'back near the hunting area, any letter case');
+  const g = joinMainFixture(); g.Settings.profile.party.leaveIfNotLeader = true; g.Hunt.cfg().center = null;
+  g.World.gp.social = { localName: 'AltChar', self: 2, leader: 1, options: 1, members: [{ id: 1, name: 'OtherAlt' }, { id: 2, name: 'AltChar' }], invitation: null };
+  g.World.ents.set(56, { gid: 56, kind: 'player', name: 'MainChar', regionId: 9, x: 5000, y: 0, z: 5000 });
+  g.Party.tick(); assert.equal(g.commands.filter(c => c.kind === 'party-leave').length, 1, 'without a hunting spot, in view is enough');
+});
+
+test('the main answers a party application while dead or waiting after a revive', () => {
+  for (const state of ['dead', 'revived', 'not-local']) {
+    const f = fixture(); partyApplication(f); f.Hunt.start();
+    if (state === 'dead') f.World.isDead = () => true;
+    else if (state === 'revived') { f.Controller.resumeAfterRevive = true; f.World.gp.inventoryPending = true; }
+    else { f.Controller.resumeAfterRevive = true; f.World.local = () => false; }
+    f.Controller.tick();
+    assert.deepEqual(jm(f.commands.filter(c => c.kind === 'party-match-answer')), [{ kind: 'party-match-answer', a: 40, b: 50, answer: 1 }], state);
+  }
+});
+
 test('alt account applies again when the main never answered its application', () => {
   const f = joinMainFixture({ rows: [{ id: 7, name: 'MainChar', members: 2, type: 1, min: 1, max: 90 }] });
   f.Controller.tick(); assert.equal(f.commands.length, 1);
   f.World.gp.partyMatching = { ...f.World.gp.partyMatching, joining: { id: 7 } };
   f.advance(10000); f.Controller.tick(); assert.equal(f.commands.length, 1, 'still waiting for the answer');
-  f.advance(25000); f.Controller.tick(); assert.deepEqual(jm(f.commands[1]), { kind: 'party-match-join', id: 7 });
+  f.advance(25000); f.Controller.tick(); assert.deepEqual(jm(f.commands[1]), { kind: 'party-match-page', page: 1 }, 'the board is read again first');
+  f.advance(500); f.Controller.tick(); assert.deepEqual(jm(f.commands[2]), { kind: 'party-match-join', id: 7 });
+});
+
+test('alt account reads the board again before applying again, so it follows a listing the main registered anew', () => {
+  const f = joinMainFixture({ rows: [{ id: 7, name: 'MainChar', members: 2, type: 1, min: 1, max: 90 }] });
+  f.Controller.tick(); assert.deepEqual(jm(f.commands.at(-1)), { kind: 'party-match-join', id: 7 });
+  f.World.gp.partyMatching = { ...f.World.gp.partyMatching, pending: null, joining: { name: 'MainChar' }, result: 2 };
+  f.advance(31000); f.Controller.tick();
+  assert.deepEqual(jm(f.commands.at(-1)), { kind: 'party-match-page', page: 1 }, 'the old listing number is not used again');
+  assert.match(f.Party.joinMessage, /again/);
+  f.World.gp.partyMatching = { ...f.World.gp.partyMatching, pending: null, joining: null, result: null, rows: [{ id: 9, name: 'MainChar', members: 2, type: 1, min: 1, max: 90 }] };
+  f.advance(500); f.Controller.tick();
+  assert.deepEqual(jm(f.commands.at(-1)), { kind: 'party-match-join', id: 9 });
+  assert.equal(f.commands.filter(c => c.kind === 'party-match-join' && c.id === 7).length, 1);
 });
 
 test('alt account pages the board until it finds the main, then rests', () => {
