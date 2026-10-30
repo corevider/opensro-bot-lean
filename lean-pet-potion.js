@@ -16,6 +16,13 @@ const PetPotion = {
   kits() { return World.items().filter(i => Number.isInteger(i.typeFlags) && ItemType.potionCategory(i.typeFlags) === 4 && (i.quantity ?? 1) > 0); },
   total(ref) { return this.kits().filter(i => i.refObjId === ref).reduce((n, i) => n + (i.quantity ?? 1), 0); },
   heal(item) { return Number(item.tooltip?.fields?.itemParam1_29c) || 0; },
+  // The server scales a kit's flat heal by the owner's strength and level — (strength/416 + 1) * 1.02^(level-1) * base —
+  // so a small kit covers far more than its tooltip value. Without the estimate the picker takes the biggest kit.
+  healEstimate(item) {
+    const base = this.heal(item), s = World.gp?.progression?.stats, level = World.gp?.progression?.level;
+    if (!base || !Number.isFinite(s?.strength) || !Number.isInteger(level) || level < 1) return base;
+    return Math.max(base, Math.floor((s.strength / 416 + 1) * Math.pow(1.02, level - 1) * base));
+  },
   foods() { return World.items().filter(i => Number.isInteger(i.typeFlags) && ItemType.potionCategory(i.typeFlags) === 9 && (i.quantity ?? 1) > 0); },
   foodTotal(ref) { return this.foods().filter(i => i.refObjId === ref).reduce((n, i) => n + (i.quantity ?? 1), 0); },
   foodPct(item) { return Number(item.tooltip?.fields?.itemParam1_29c) || 0; },
@@ -59,10 +66,10 @@ const PetPotion = {
     }
     return out;
   },
-  // Smallest kit that covers the missing HP, otherwise the biggest one.
+  // Smallest kit whose estimated heal covers the missing HP, otherwise the biggest one.
   pick(missing) {
     const kits = this.kits().sort((a, b) => this.heal(a) - this.heal(b));
-    return kits.find(k => this.heal(k) >= missing) || kits[kits.length - 1] || null;
+    return kits.find(k => this.healEstimate(k) >= missing) || kits[kits.length - 1] || null;
   },
   // Smallest food whose percentage covers the missing satiety, otherwise the biggest one.
   pickFood(missing) {

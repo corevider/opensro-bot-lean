@@ -39,6 +39,7 @@ const DEFAULT_PROFILE = {
       cure: { on: false, refObjId: 58, low: 10, target: 50 },
       vigor: { on: false, refObjId: 22, low: 10, target: 50 },
       hgp: { on: false, refObjId: 0, low: 5, target: 50 },
+      kit: { on: false, refObjId: 0, low: 5, target: 50 },
       ammo: { arrow: { on: false, low: 200, target: 2000 }, bolt: { on: false, low: 200, target: 2000 } },
     },
   },

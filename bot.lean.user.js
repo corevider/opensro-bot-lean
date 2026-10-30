@@ -223,6 +223,7 @@ const DEFAULT_PROFILE = {
       cure: { on: false, refObjId: 58, low: 10, target: 50 },
       vigor: { on: false, refObjId: 22, low: 10, target: 50 },
       hgp: { on: false, refObjId: 0, low: 5, target: 50 },
+      kit: { on: false, refObjId: 0, low: 5, target: 50 },
       ammo: { arrow: { on: false, low: 200, target: 2000 }, bolt: { on: false, low: 200, target: 2000 } },
     },
   },
@@ -1441,7 +1442,7 @@ const Restock = {
     // Only single-item gold offers; package quantities have different purchase semantics.
     if (o.currency !== undefined && o.currency !== 1) return '';
     if (o.contents?.length && (o.contents.length !== 1 || o.contents[0].refObjId !== o.refObjId || o.contents[0].quantity !== 1)) return '';
-    return cat === 1 ? 'hp' : cat === 2 ? 'mp' : cat === 3 ? 'vigor' : cat === 9 ? 'hgp' : o.refObjId === 58 && ItemType.isCure(item?.typeFlags ?? 0) ? 'cure' : '';
+    return cat === 1 ? 'hp' : cat === 2 ? 'mp' : cat === 3 ? 'vigor' : cat === 9 ? 'hgp' : cat === 4 ? 'kit' : o.refObjId === 58 && ItemType.isCure(item?.typeFlags ?? 0) ? 'cure' : '';
   },
   activeShop() {
     const gp = World.gp;
@@ -1496,8 +1497,8 @@ const Restock = {
   unbuyable: new Set(),
   supplies() {
     const c = this.cfg();
-    return ['hp', 'mp', 'vigor', 'cure', 'hgp']
-      .filter(k => c[k].on && !this.unbuyable.has(c[k].refObjId) && (k !== 'hgp' || c[k].refObjId > 0))
+    return ['hp', 'mp', 'vigor', 'cure', 'hgp', 'kit']
+      .filter(k => c[k].on && !this.unbuyable.has(c[k].refObjId) && ((k === 'hgp' || k === 'kit') ? c[k].refObjId > 0 : true))
       .map(k => ({ kind: k, ...c[k], ...(k === 'cure' ? { refObjId: 58 } : {}) }));
   },
   validate() {
@@ -1607,8 +1608,8 @@ const Restock = {
         return true;
       }
       const offer = shop.offers.find(o => o.refObjId === s.refObjId && this.offerKind(o) === s.kind);
-      // Pet food is a convenience here: a merchant without it must not stop the potion refill.
-      if (!offer && s.kind === 'hgp') { t.skipped.push(s.refObjId); this.unbuyable.add(s.refObjId); this.tell('This merchant does not sell HGP recovery potions; skipped them for this session.'); return true; }
+      // Pet supplies are a convenience here: a merchant without them must not stop the potion refill.
+      if (!offer && (s.kind === 'hgp' || s.kind === 'kit')) { t.skipped.push(s.refObjId); this.unbuyable.add(s.refObjId); this.tell('This merchant does not sell ' + (s.kind === 'hgp' ? 'HGP recovery potions' : 'pet recovery kits') + '; skipped them for this session.'); return true; }
       if (!offer) { this.fail(s.kind === 'cure' ? 'Special Universal Pill (small) is unavailable at this merchant.' : 'Selected potion is unavailable at this merchant.'); return true; }
       const before = this.count(s.refObjId);
       const stackRoom = World.items().filter(i => i.refObjId === s.refObjId).reduce((n, i) => n + Math.max(0, offer.maxStack - (i.quantity ?? 1)), 0);
@@ -7665,9 +7666,9 @@ const Town = {
       if (best) { this.tier[s.kind] = s.refObjId = best.refObjId; return; }
     }
     if (!offer || !(offer.maxStack > 0)) {
-      // Pet food is a convenience here: a merchant without it must not stop the town trip, and must not
-      // re-trigger one either: the supply is remembered as unbuyable until the merchant is re-recorded.
-      if (s.kind === 'hgp') { t.buySkipped.push(s.refObjId); Restock.unbuyable.add(s.refObjId); this.message = 'This merchant does not sell HGP recovery potions; skipped them for this session.'; UI.toast(this.message, 'warn', 6000); return; }
+      // Pet supplies are a convenience here: a merchant without them must not stop the town trip, and must
+      // not re-trigger one either: the supply is remembered as unbuyable until the merchant is re-recorded.
+      if (s.kind === 'hgp' || s.kind === 'kit') { t.buySkipped.push(s.refObjId); Restock.unbuyable.add(s.refObjId); this.message = 'This merchant does not sell ' + (s.kind === 'hgp' ? 'HGP recovery potions' : 'pet recovery kits') + '; skipped them for this session.'; UI.toast(this.message, 'warn', 6000); return; }
       return this.fail(s.kind === 'scroll' ? 'Selected scroll is unavailable here.' : s.kind === 'cure' ? 'Special Universal Pill (small) is unavailable here.' : s.kind === 'vigor' ? 'The selected vigor potion size is unavailable here; choose another size in Supplies.' : 'X-Large ' + s.kind.toUpperCase() + ' potion is unavailable here.');
     }
     const before = Restock.count(s.refObjId), room = World.items().filter(i => i.refObjId === s.refObjId).reduce((n, i) => n + Math.max(0, offer.maxStack - (i.quantity ?? 1)), 0);
@@ -11471,6 +11472,13 @@ const PetPotion = {
   kits() { return World.items().filter(i => Number.isInteger(i.typeFlags) && ItemType.potionCategory(i.typeFlags) === 4 && (i.quantity ?? 1) > 0); },
   total(ref) { return this.kits().filter(i => i.refObjId === ref).reduce((n, i) => n + (i.quantity ?? 1), 0); },
   heal(item) { return Number(item.tooltip?.fields?.itemParam1_29c) || 0; },
+  // The server scales a kit's flat heal by the owner's strength and level — (strength/416 + 1) * 1.02^(level-1) * base —
+  // so a small kit covers far more than its tooltip value. Without the estimate the picker takes the biggest kit.
+  healEstimate(item) {
+    const base = this.heal(item), s = World.gp?.progression?.stats, level = World.gp?.progression?.level;
+    if (!base || !Number.isFinite(s?.strength) || !Number.isInteger(level) || level < 1) return base;
+    return Math.max(base, Math.floor((s.strength / 416 + 1) * Math.pow(1.02, level - 1) * base));
+  },
   foods() { return World.items().filter(i => Number.isInteger(i.typeFlags) && ItemType.potionCategory(i.typeFlags) === 9 && (i.quantity ?? 1) > 0); },
   foodTotal(ref) { return this.foods().filter(i => i.refObjId === ref).reduce((n, i) => n + (i.quantity ?? 1), 0); },
   foodPct(item) { return Number(item.tooltip?.fields?.itemParam1_29c) || 0; },
@@ -11514,10 +11522,10 @@ const PetPotion = {
     }
     return out;
   },
-  // Smallest kit that covers the missing HP, otherwise the biggest one.
+  // Smallest kit whose estimated heal covers the missing HP, otherwise the biggest one.
   pick(missing) {
     const kits = this.kits().sort((a, b) => this.heal(a) - this.heal(b));
-    return kits.find(k => this.heal(k) >= missing) || kits[kits.length - 1] || null;
+    return kits.find(k => this.healEstimate(k) >= missing) || kits[kits.length - 1] || null;
   },
   // Smallest food whose percentage covers the missing satiety, otherwise the biggest one.
   pickFood(missing) {
@@ -15576,7 +15584,12 @@ const UI = {
         this.select('HGP potion', () => [[0, 'Choose the merchant\'s pet food'], ...C().offers.filter(o => o.kind === 'hgp').map(o => [o.refObjId, o.name])], () => C().hgp.refObjId, v => C().hgp.refObjId = Number(v)),
         this.number('HGP low stock ≤', () => C().hgp.low, v => C().hgp.low = v, 0, 9999),
         this.number('HGP refill to', () => C().hgp.target, v => C().hgp.target = v, 1, 10000),
-        el('p', 'Pet food for the attack pet\'s HGP. Pick the pet food the recorded merchant sells; on a refill trip it is bought like the potions, and a merchant without it skips it with a notice. Feeding is set under Automatic potion use.', 'muted'));
+        el('p', 'Pet food for the attack pet\'s HGP. Pick the pet food the recorded merchant sells; on a refill trip it is bought like the potions, and a merchant without it skips it with a notice. Feeding is set under Automatic potion use.', 'muted'),
+        this.check('Buy pet recovery kits', () => C().kit.on, v => C().kit.on = v),
+        this.select('Recovery kit', () => [[0, 'Choose the merchant\'s pet kits'], ...C().offers.filter(o => o.kind === 'kit').map(o => [o.refObjId, o.name])], () => C().kit.refObjId, v => C().kit.refObjId = Number(v)),
+        this.number('Kits low stock ≤', () => C().kit.low, v => C().kit.low = v, 0, 9999),
+        this.number('Kits refill to', () => C().kit.target, v => C().kit.target = v, 1, 10000),
+        el('p', 'Pet recovery kits for the attack and pickup pets, bought on the same refill trips as the pet food; a merchant without them skips them with a notice. Using them is set under Automatic potion use.', 'muted'));
       shop.append(el('p', 'Refill targets are total potion counts, including what is already in your bag. Used for low-supply, full-bag and revival trips, and walking-route restock when the town cycle is off. Set MP refill to 1000 for 1,000 MP potions. Changes apply to the next trip.', 'muted'));
       host.append(shop);
   },
