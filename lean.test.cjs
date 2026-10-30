@@ -4126,7 +4126,9 @@ test('town cycle does not repeat unconfirmed pet transfers and stops on full sto
   f.World.gp.storage = { npc: 60, phase: 'open', capacity: 1, items: [] }; f.World.gp.target = 60;
   f.Town.store(); assert.equal(f.commands.at(-1).kind, 'cos-transfer');
   f.advance(600); f.Town.store(); assert.equal(f.commands.filter(c => c.kind === 'cos-transfer').length, 1);
-  f.advance(15000); f.Town.store(); assert.equal(f.Hunt.running, false); assert.equal(f.Town.trip, null);
+  f.advance(15000); f.Town.store(); assert.equal(f.Town.trip.phase, 'settle'); assert.equal(f.Hunt.running, true);
+  f.Town.tick(); assert.equal(f.commands.filter(c => c.kind === 'cos-transfer').length, 1);
+  assert.equal(f.commands.at(-1).kind, 'npc-close');
   const g = townFixture(); g.Town.begin(); g.Town.enter('store');
   g.World.gp.storage = { npc: 60, phase: 'open', capacity: 1, items: [{ slot: 0, refObjId: 999 }] }; g.World.gp.target = 60;
   g.Town.store(); assert.match(g.Town.message, /Storage is full/); assert.equal(g.commands.some(c => c.kind === 'cos-transfer'), false);
@@ -4293,7 +4295,8 @@ test('town sells only unprotected non-elixir pet loot and waits for a full sale 
   f.pet.inventory[1].quantity = 1; f.advance(1000); f.Town.tick();
   assert.ok(f.Town.trip.pending); assert.equal(f.commands.filter(c => c.kind === 'cos-shop-sell').length, 1);
   f.advance(15000); f.Town.tick();
-  assert.equal(f.Town.trip, null); assert.match(f.Town.message, /not confirmed/);
+  assert.equal(f.Town.trip.phase, 'settle'); assert.match(f.Town.message, /not confirmed/);
+  f.Town.tick(); assert.equal(f.commands.at(-1).kind, 'npc-close');
   assert.equal(f.commands.filter(c => c.kind === 'cos-shop-sell').length, 1);
   assert.equal(f.commands.some(c => c.kind === 'shop-sell'), false);
 });
@@ -4367,6 +4370,90 @@ test('town never sells items the game marks unsellable, and skips a refused sale
   gp.error = null; f.pet.inventory = [quest, refused]; f.advance(1000); f.Town.tick();
   assert.equal(f.Town.trip.phase, 'repair');
   assert.equal(f.commands.filter(c => c.kind === 'cos-shop-sell').length, 2, 'the refused item is not offered again');
+});
+
+function stalledSale() {
+  const f = townFixture(), gp = f.World.gp;
+  const ware = (slot, ref) => ({ slot, refObjId: ref, typeFlags: 44 | (6 << 7), quantity: 1, plus: 0, magic: [], tooltip: { fields: { rarity: 0 } } });
+  f.Town.cfg().storeSox = false;
+  f.pet.status = 20; f.pet.inventory = [ware(5, 1100), ware(6, 1101)];
+  f.Town.begin(); f.Town.enter('sell'); gp.target = 62; gp.shop = { npc: 62 };
+  f.Town.tick(); assert.equal(f.commands.at(-1).slot, 5);
+  gp.inventoryPending = true; f.advance(16000); f.Town.tick();
+  return { f, gp, ware };
+}
+const sales = f => f.commands.filter(c => c.kind === 'cos-shop-sell');
+test('a stalled sale is not sent again: the trip waits for the game, closes the shop and sells from what is left', () => {
+  const { f, gp, ware } = stalledSale();
+  assert.equal(f.Town.trip?.phase, 'settle'); assert.equal(f.Hunt.running, true);
+  assert.match(f.Town.message, /timed out.*Nothing is sent again.*repair merchant over/);
+  f.advance(30000); f.Town.tick();
+  assert.equal(f.Town.trip.phase, 'settle'); assert.equal(sales(f).length, 1, 'nothing is sent while the game is busy');
+  gp.inventoryPending = false; f.pet.inventory = [ware(6, 1101)]; f.Town.tick();
+  assert.equal(f.commands.at(-1).kind, 'npc-close');
+  f.Town.tick(); assert.equal(f.commands.filter(c => c.kind === 'npc-close').length, 1, 'the close is sent once');
+  gp.target = null; gp.shop = null; f.Town.tick();
+  assert.equal(f.Town.trip.phase, 'walk-smith');
+  f.Town.walk = () => true; f.Town.tick(); f.Town.tick();
+  assert.equal(f.Town.trip.phase, 'open-smith'); assert.equal(f.commands.at(-1).kind, 'select');
+  gp.target = 62; gp.targetCapabilities = 9; f.Town.tick(); assert.equal(f.commands.at(-1).kind, 'shop-open');
+  gp.shop = { npc: 62 }; gp.shopCompletionRevision++; f.Town.tick(); f.Town.tick();
+  assert.deepEqual(sales(f).map(c => c.slot), [5, 6], 'the item the stalled sale took is not offered again');
+  f.pet.inventory = []; f.advance(1000); f.Town.tick();
+  assert.equal(f.Town.trip.phase, 'repair');
+});
+test('a second stalled transaction in the same trip stops the town cycle', () => {
+  const { f, gp } = stalledSale();
+  gp.inventoryPending = false; gp.target = null; gp.shop = null; f.Town.tick();
+  f.Town.enter('sell'); gp.target = 62; gp.shop = { npc: 62 }; f.Town.tick();
+  assert.equal(sales(f).at(-1).slot, 5);
+  gp.inventoryPending = true; f.advance(16000); f.Town.tick();
+  assert.equal(f.Town.trip, null); assert.equal(f.Hunt.running, false);
+  assert.match(f.Town.message, /Inventory transaction timed out\. No repeat command sent/);
+  assert.equal(sales(f).length, 2);
+});
+test('a game that never finishes the stalled transaction is reloaded once, with hunting kept for the reconnect', () => {
+  const { f, gp } = stalledSale(); let reloads = 0;
+  f.Reconnect.doReload = () => { reloads++; };
+  f.World.charName = f.Town.trip.character = 'Tester'; f.Reconnect.snapshot();
+  assert.equal(f.Town.trip.phase, 'settle');
+  f.advance(59000); f.Town.tick(); assert.equal(reloads, 0);
+  f.advance(2000); f.Town.tick();
+  assert.equal(reloads, 1); assert.equal(f.Town.trip, null);
+  assert.equal(JSON.parse(f.storage.get('sro-lean-reload')).pending.hunting, true);
+  assert.equal(gp.inventoryPending, true);
+  assert.equal(sales(f).length, 1);
+  f.Town.begin(); f.Town.enter('settle'); f.Town.trip.resume = 'walk-smith';
+  f.advance(61000); f.Town.tick();
+  assert.equal(reloads, 1, 'a game that never answers is not reloaded in a loop');
+  assert.equal(f.Town.trip, null); assert.equal(f.Hunt.running, false); assert.match(f.Town.message, /again after a reload/);
+});
+test('a stalled warehouse deposit puts the item first in line when the warehouse is opened again', () => {
+  const f = townFixture(), gp = f.World.gp;
+  f.Town.begin(); f.Town.enter('store');
+  gp.storage = { npc: 60, phase: 'open', capacity: 5, items: [] }; gp.target = 60;
+  f.Town.store(); const move = f.commands.at(-1); assert.equal(move.kind, 'cos-transfer');
+  const item = f.pet.inventory.find(i => i.slot === move.source);
+  f.pet.inventory = f.pet.inventory.filter(i => i !== item); gp.inventory.push({ ...item, slot: move.destination });
+  f.advance(1000); f.Town.store();
+  const deposits = () => f.commands.filter(c => c.kind === 'storage-move');
+  assert.equal(deposits().length, 1); assert.equal(deposits()[0].move.source, move.destination);
+  gp.inventoryPending = true; f.advance(16000); f.Town.store();
+  assert.equal(f.Town.trip.phase, 'settle');
+  gp.inventoryPending = false; f.Town.tick(); assert.equal(f.commands.at(-1).kind, 'npc-close');
+  gp.storage = null; gp.target = null; f.Town.tick();
+  assert.equal(f.Town.trip.phase, 'walk-storage');
+  f.Town.walk = () => true; f.Town.tick(); f.Town.tick();
+  gp.target = 60; gp.targetCapabilities = 4; f.Town.tick(); assert.equal(f.commands.at(-1).kind, 'storage-open');
+  gp.storage = { npc: 60, phase: 'open', capacity: 5, items: [] }; f.Town.tick(); f.Town.tick();
+  assert.equal(deposits().length, 2); assert.equal(deposits()[1].move.source, move.destination, 'the bag item is deposited, not left in the bag');
+});
+test('a stalled transaction outside a shop or the warehouse still stops the trip', () => {
+  const f = townFixture();
+  f.Town.begin(); f.Town.enter('pet-revive'); f.Town.trip.pending = { at: f.Town.trip.at };
+  f.World.gp.inventoryPending = true; f.advance(16000);
+  f.Town.pendingDone(() => false);
+  assert.equal(f.Town.trip, null); assert.match(f.Town.message, /timed out\. No repeat command sent/);
 });
 
 test('town sells unprotected character bag items only when the bag switch is on', () => {
@@ -4571,7 +4658,8 @@ test('town purchase requires exact quantity gain and enough gold, without duplic
   f.Town.buy(); assert.equal(f.commands.at(-1).quantity, 49);
   gp.inventory.find(i => i.refObjId === 15).quantity++; f.advance(1000); f.Town.buy();
   assert.ok(f.Town.trip.pending); assert.equal(f.commands.filter(c => c.kind === 'shop-buy').length, 1);
-  f.advance(15000); f.Town.buy(); assert.equal(f.Town.trip, null);
+  f.advance(15000); f.Town.buy(); assert.equal(f.Town.trip.phase, 'settle');
+  f.Town.tick(); assert.equal(f.commands.filter(c => c.kind === 'shop-buy').length, 1, 'an unconfirmed purchase is never sent again');
   const g = townFixture(); g.Town.begin(); g.Town.enter('buy'); g.World.gp.target = 61; g.World.gp.shop = gp.shop; g.World.gp.progression.gold = '1';
   g.Town.buy(); assert.equal(g.commands.some(c => c.kind === 'shop-buy'), false); assert.match(g.Town.message, /gold/);
 });
