@@ -8729,6 +8729,8 @@ const BuffGear = {
     if (r.cast) {
       const p = r.cast, remaining = p.party ? (p.entry.shows() ? 1 : 0) : World.buffRemaining(p.id);
       if (remaining > 0) { p.accepted = true; p.visible = true; }
+      const refused = !p.accepted && p.party && p.entry.refused?.();
+      if (refused) { this.cancel(); this.message = refused; r.cast = null; return true; }
       if (now() < p.until || World.isCasting()) return true;
       if (!p.accepted) { if (now() - p.at > 10000) { if (!p.party) this.skipped.set(p.group, { signature: r.signature, until: now() + 120000, why: 'the cast was not confirmed, trying again in two minutes' }); this.cancel(); this.message = 'Buff cast unconfirmed; restoring combat gear.'; r.cast = null; } return true; }
       r.effects.push(p); r.cast = null;
@@ -8843,10 +8845,12 @@ const SUPPORT_TARGET_FRIEND = 16 | 32;
 const SUPPORT_CONFIRM_MS = 6000;  // a buff cast that shows no effect on the member by then is a miss
 const SUPPORT_BACKOFF_MS = 60000; // after two misses in a row that buff on that member waits a minute
 const SUPPORT_WEAPON_BACKOFF_MS = 10 * 60000; // a buff that ends when the weapon changes back waits ten minutes
+const SUPPORT_OVERLAP_MS = 30 * 60000; // a member whose buffs do not stack with ours waits for them to change, at most this
+const SUPPORT_OVERLAP_KEY = /^UIIT_(STT_)?SKILL_USE_FAIL_OVERLAP(_COUNT)?$/;
 const Support = {
-  holdUntil: 0, sent: new Map(), misses: new Map(), message: 'Party support off.',
+  holdUntil: 0, sent: new Map(), misses: new Map(), overlaps: new Map(), lastBuff: null, message: 'Party support off.',
   cfg() { return Settings.profile.party.support; },
-  reset() { this.holdUntil = 0; this.sent.clear(); this.misses.clear(); },
+  reset() { this.holdUntil = 0; this.sent.clear(); this.misses.clear(); this.overlaps.clear(); this.lastBuff = null; },
   // Skills that can be cast on another party member (heals and most buffs), best learned level per group.
   friendlySkills() {
     const best = new Map();
@@ -8886,19 +8890,59 @@ const Support = {
     }
     return false;
   },
-  ready(id) {
-    return id && !Combat.blocked?.(id) && Cmd.canCast(id) && Combat.mpOk(id, World.me());
+  // Heals and buffs go to several members, so a refusal for one member (out of reach, a buff it cannot take) must not
+  // hold the skill back from the others. Combat.blocked also counts whoever is selected, which is that member after a
+  // refusal; here only the skill-wide block counts, and each member's own block is checked with blockedFor.
+  castable(id) {
+    return id && !this.blockedFor(id, 0) && Cmd.canCast(id) && Combat.mpOk(id, World.me());
+  },
+  blockedFor(id, gid) {
+    const until = key => Combat.stuck?.get(key)?.until || 0, t = now();
+    return t < until(id) || !!gid && t < until(Combat.failureKey(id, gid));
+  },
+  // Skills of the effects a member shows, other than this buff's own group.
+  effects(gid, group) {
+    return [...new Set((World.gp?.attachedEffects || []).filter(ef => ef && ef.gid === gid && World.skill(ef.skill)?.group !== group).map(ef => ef.skill))];
+  },
+  // The game refused this buff for this member because of an effect it already has ("cannot overlap", such as
+  // Earth Fire Protection or Might Guard of Ice against a European defence buff). The member is skipped until one of
+  // the effects it had then ends, so the other members are not held up.
+  overlapped(m, b) {
+    const key = m.name + ':' + b.group, o = this.overlaps.get(key);
+    if (!o) return false;
+    const current = new Set(this.effects(m.gid, b.group));
+    if (now() < o.until && o.effects.every(id => current.has(id))) return true;
+    this.overlaps.delete(key);
+    return false;
+  },
+  // The notice names no skill, so it belongs to the party buff only while that buff is still the last thing cast.
+  // Combat also counts the refusal against the member (Combat.fail); that block is lifted on the next tick so it
+  // does not hold the skill back from self buffs and the rotation while the member stays selected. Without a known
+  // effect to wait for (none visible), the member is tried again after a minute.
+  notice(n) {
+    const last = this.lastBuff;
+    if (!last || now() - last.at > 2000 || !SUPPORT_OVERLAP_KEY.test(String(n?.key || ''))) return;
+    this.lastBuff = null;
+    if (Combat.lastCastId !== last.id || Combat.lastCastGid !== last.gid) return;
+    const key = last.name + ':' + last.group, effects = this.effects(last.gid, last.group);
+    this.overlaps.set(key, { effects, until: now() + (effects.length ? SUPPORT_OVERLAP_MS : SUPPORT_BACKOFF_MS), combatKey: Combat.failureKey(last.id, last.gid) });
+    this.sent.delete(key); this.misses.delete(key);
+    Log.info(`Party support: ${last.name} has a buff that ${World.skillName(last.id)} does not stack with; skipping ${last.name} until it ends.`);
+  },
+  release() {
+    for (const o of this.overlaps.values()) if (o.combatKey) { Combat.stuck?.delete(o.combatKey); o.combatKey = null; }
   },
   // Whether a party buff is still wanted on this member and castable: alive, in range and without it.
   wants(b, name) {
     const m = this.members().find(x => x.name === name), id = this.skillOf(b);
-    return !!(this.cfg().enabled && this.ready(id) && m && m.alive && m.inRange && !this.has(m.gid, id));
+    return !!(this.cfg().enabled && this.castable(id) && m && m.alive && m.inRange && !this.blockedFor(id, m.gid) && !this.has(m.gid, id) && !this.overlapped(m, b));
   },
   // Cast a party buff at the member by name (called by a weapon swap once the gear is on).
   castBuff(b, name) {
     const m = this.members().find(x => x.name === name), id = this.skillOf(b);
-    if (!m || !this.ready(id) || !this.cast(id, m, `${World.skillName(id)} on ${m.name}`)) return false;
+    if (!m || !this.castable(id) || this.blockedFor(id, m.gid) || !this.cast(id, m, `${World.skillName(id)} on ${m.name}`)) return false;
     this.sent.set(m.name + ':' + b.group, now());
+    this.lastBuff = { id, group: b.group, name: m.name, gid: m.gid, at: now() };
     return true;
   },
   // Whether the member shows the buff at all, and what to do when it ended with the swapped weapon.
@@ -8920,6 +8964,7 @@ const Support = {
   },
   tick() {
     const c = this.cfg();
+    this.release();
     if (!c.enabled) { this.message = 'Party support off.'; return false; }
     if (!World.inWorld() || World.isDead()) { this.message = 'Waiting for a living character.'; return false; }
     if (!Hunt.running && !c.whileStopped) { this.message = 'Waiting for hunting to start (or tick Also while hunting is stopped).'; return false; }
@@ -8932,30 +8977,32 @@ const Support = {
     const living = members.filter(m => m.alive && m.inRange && (!m.self || c.heal.self));
     // 1. Group heal when enough members are low.
     const groupId = this.skillOf(c.group);
-    if (groupId && this.ready(groupId)) {
-      const low = living.filter(m => m.hpPct < c.group.pct);
-      if (low.length >= c.group.count) return this.cast(groupId, low.sort((a, b) => a.hpPct - b.hpPct)[0], `group heal (${low.length} below ${c.group.pct}%)`);
+    if (groupId && this.castable(groupId)) {
+      const low = living.filter(m => m.hpPct < c.group.pct), target = low.filter(m => !this.blockedFor(groupId, m.gid)).sort((a, b) => a.hpPct - b.hpPct)[0];
+      if (low.length >= c.group.count && target) return this.cast(groupId, target, `group heal (${low.length} below ${c.group.pct}%)`);
     }
     // 2. Heal the lowest member below the threshold.
     const healId = this.skillOf(c.heal);
-    if (healId && this.ready(healId)) {
-      const low = living.filter(m => m.hpPct < c.heal.pct).sort((a, b) => a.hpPct - b.hpPct)[0];
+    if (healId && this.castable(healId)) {
+      const low = living.filter(m => m.hpPct < c.heal.pct && !this.blockedFor(healId, m.gid)).sort((a, b) => a.hpPct - b.hpPct)[0];
       if (low) return this.cast(healId, low, `heal ${low.self ? 'myself' : low.name} (${Math.round(low.hpPct)}%)`);
     }
     // 3. Buffs a member does not have yet. A cast that never shows on the member counts as a miss. A buff that needs
     // other gear (the weapon its skill needs, or the gear chosen for it) is cast in a weapon swap that comes back after.
     const t = now();
     let note = '';
+    const skipped = new Set();
     for (const b of c.buffs) {
       const id = this.skillOf(b);
-      if (!id || !this.ready(id)) continue;
+      if (!id || !this.castable(id)) continue;
       const only = splitList(b.only || '');
       // The caster comes last: friendly buffs such as Body Deity and Soul Deity can be cast on oneself too.
       for (const m of [...party, ...members.filter(x => x.self)]) {
         if (!m.alive || !m.inRange || only.length && !only.includes(String(m.name || '').toLowerCase())) continue;
         const key = m.name + ':' + b.group, sent = this.sent.get(key), miss = this.misses.get(key) || { n: 0, until: 0 };
-        if (this.has(m.gid, id)) { this.misses.delete(key); this.sent.delete(key); continue; }
-        if (t < miss.until) continue;
+        if (this.has(m.gid, id)) { this.misses.delete(key); this.sent.delete(key); this.overlaps.delete(key); continue; }
+        if (this.overlapped(m, b)) { skipped.add(m.name); continue; }
+        if (this.blockedFor(id, m.gid) || t < miss.until) continue;
         if (sent && t - sent < SUPPORT_CONFIRM_MS) continue;
         if (sent) {
           miss.n++; this.sent.delete(key);
@@ -8966,20 +9013,27 @@ const Support = {
         const gear = BuffGear.forParty(b, id);
         if (typeof gear === 'string') { note = gear; break; }
         if (gear) {
-          const entry = { party: true, id, due: () => this.wants(b, m.name), cast: () => this.castBuff(b, m.name), shows: () => this.shows(b, m.name), ended: () => this.ended(b, m.name) };
+          const entry = { party: true, id, due: () => this.wants(b, m.name), cast: () => this.castBuff(b, m.name), shows: () => this.shows(b, m.name), ended: () => this.ended(b, m.name),
+            refused: () => this.overlaps.has(key) && `${m.name} has a buff that ${World.skillName(id)} does not stack with; restoring combat gear.` };
           if (BuffGear.startParty(gear, entry)) { this.message = `${World.skillName(id)} on ${m.name}: changing weapons.`; return true; }
           // Not now (fighting, a window open): the other buffs, which need no swap, still go out.
           note = BuffGear.waiting || `${World.skillName(id)} on ${m.name}: waiting to change weapons.`;
           break;
         }
-        if (this.cast(id, m, `${World.skillName(id)} on ${m.name}`)) { this.sent.set(key, t); return true; }
+        if (this.cast(id, m, `${World.skillName(id)} on ${m.name}`)) {
+          this.sent.set(key, t);
+          this.lastBuff = { id, group: b.group, name: m.name, gid: m.gid, at: t };
+          return true;
+        }
         return false;
       }
     }
-    this.message = note || (party.some(m => m.alive && !m.inRange) ? 'Some party members are out of view or out of range.' : 'Party is healed and buffed.');
+    const done = party.some(m => m.alive && !m.inRange) ? 'Some party members are out of view or out of range.' : 'Party is healed and buffed.';
+    this.message = (note || done) + (skipped.size ? ` Skipped (a buff that does not stack): ${[...skipped].join(', ')}.` : '');
     return false;
   },
 };
+bus.on('notice', n => Support.notice(n));
 
 
 // Automatic trading. Buys specialty goods into the summoned transport at one town's trade merchant, walks to another

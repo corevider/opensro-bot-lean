@@ -362,6 +362,8 @@ const BuffGear = {
     if (r.cast) {
       const p = r.cast, remaining = p.party ? (p.entry.shows() ? 1 : 0) : World.buffRemaining(p.id);
       if (remaining > 0) { p.accepted = true; p.visible = true; }
+      const refused = !p.accepted && p.party && p.entry.refused?.();
+      if (refused) { this.cancel(); this.message = refused; r.cast = null; return true; }
       if (now() < p.until || World.isCasting()) return true;
       if (!p.accepted) { if (now() - p.at > 10000) { if (!p.party) this.skipped.set(p.group, { signature: r.signature, until: now() + 120000, why: 'the cast was not confirmed, trying again in two minutes' }); this.cancel(); this.message = 'Buff cast unconfirmed; restoring combat gear.'; r.cast = null; } return true; }
       r.effects.push(p); r.cast = null;
