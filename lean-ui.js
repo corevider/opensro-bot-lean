@@ -705,6 +705,8 @@ const UI = {
   section_combatHuntArea(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
       host.append(this.group('Hunting area',
+        this.check('Attack monsters', () => H().attack !== false, v => H().attack = v),
+        el('p', 'Turn off for a support character: it never starts a fight, not even with monsters that hit it, and keeps picking up loot, its own buffs and Party support (heals and party buffs) at the hunting spot or beside the member it follows.', 'muted'),
         this.button('Set hunting spot here', () => { if (World.inWorld() && Hunt.setCenter()) this.toast('Hunting spot saved.'); }),
         this.number('Hunt radius (m)', () => H().radius / 10, v => H().radius = v * 10, 5, 200),
         this.number('Chase distance (m)', () => H().chase / 10, v => H().chase = v * 10, 10, 300),
