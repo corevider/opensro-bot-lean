@@ -2,6 +2,7 @@
 // A buff's gear choice: a saved set's id, 0 for the automatic choice, or one of the weapons and shield chosen under Combat.
 const BUFF_GEAR_KINDS = ['primary', 'secondary', 'shield'];
 const BUFF_COMBAT_HOLD_MS = 5 * 60000;
+const BUFF_RUN_BUDGET_MS = 60000; // a weapon change stops starting casts after this and restores the combat gear
 const BuffGear = {
   run: null, recovery: null, autoRestore: false, message: 'Buff weapon swapping off.', skipped: new Map(), waiting: '', started: false, bad: new Set(), combatHold: 0,
   cfg() { return Settings.profile.macro; },
@@ -173,14 +174,15 @@ const BuffGear = {
     return { home, worn: this.setup(), queue, restoring: false, pending: null, cast: null, effects: [],
       at: now(), manualAt: Manual.lastAt, character: World.charName, profile: Settings.profile, signature: this.signature() };
   },
-  due(b, auto) {
+  // earlyMs: during a weapon change that happens anyway, renew a buff with up to this much left.
+  due(b, auto, earlyMs = 0) {
     if (!b.enabled || !b.gearSet && !auto) return 0;
     const id = Combat.resolve(b), info = World.skill(id);
     if (!id || !info || info.targetRequired && !(info.targets & 1) || Combat.blocked(id) || !Cmd.canCast(id) || !Combat.mpOk(id, World.me())) return 0;
     const skip = this.skipped.get(b.group);
     if (skip) { if (skip.signature === this.signature() && now() < skip.until) return 0; this.skipped.delete(b.group); }
     const remaining = World.buffRemaining(id);
-    if (remaining > (b.refreshS ?? 3) * 1000) return 0;
+    if (remaining > Math.max((b.refreshS ?? 3) * 1000, earlyMs)) return 0;
     const gap = Math.max(4000, Math.min((info?.durationMs || 20000) * .85, 600000));
     return now() - (Combat.buffCastAt.get(b.group) ?? -Infinity) >= gap ? id : 0;
   },
@@ -259,9 +261,32 @@ const BuffGear = {
     if (why) return wait(why);
     this.waiting = note;
     if (!Cmd.move(World.pose())) return false;
-    Loot.suspend(); Hunt.state = 'buff'; this.run = this.create(home, queue);
+    const have = queue.flatMap(q => q.buffs);
+    for (const q of queue) { const more = this.extras(q.set, home, have); q.buffs.push(...more); have.push(...more); }
+    Loot.suspend(); Hunt.state = 'buff'; this.run = this.create(home, queue); this.run.party = have.some(e => e.party);
     this.message = 'Pausing combat for buff gear.';
     return true;
+  },
+  // Two sets that put on the same weapon and off-hand item.
+  same(a, b) { return !!a && !!b && a.weapon === b.weapon && (a.shield || null) === (b.shield || null); },
+  // The gear a buff of yours is cast with, or null when it needs no change.
+  gearOf(b, home) {
+    const set = Number(b.gearSet) ? this.cfg().buffSets.find(s => s.id === Number(b.gearSet))
+      : BUFF_GEAR_KINDS.includes(b.gearSet) ? this.gearFor(b.gearSet, home)
+      : this.owns(b) ? this.autoSet(Combat.resolve(b), home) : null;
+    return set && typeof set !== 'string' ? set : null;
+  },
+  // What else is worth casting while this gear is on, so one weapon change covers it all instead of one change per buff
+  // and member: your own buffs cast with the same gear that run out within a minute (while hunting), and the party
+  // buffs that need it, due or running out within a minute, on each member and on you.
+  extras(set, home, have) {
+    const out = [];
+    if (this.cfg().buffSwap && Hunt.running) for (const b of this.cfg().buffs) {
+      if (have.some(e => e.b === b) || !this.same(this.gearOf(b, home), set)) continue;
+      const auto = this.owns(b), id = this.due(b, auto, SUPPORT_EARLY_MS);
+      if (id) out.push({ b, id, auto, early: SUPPORT_EARLY_MS });
+    }
+    return [...out, ...Support.entriesFor(set, have.filter(e => e.party))];
   },
   // While hunting with a primary weapon chosen, put the combat gear back on when something else is worn (after a
   // reconnect or a manual change): the primary weapon, and with a one-handed one the shield.
@@ -289,8 +314,8 @@ const BuffGear = {
     if (why) { this.waiting = why; return false; }
     if (!Cmd.move(World.pose())) return false;
     Loot.suspend(); if (Hunt.running) Hunt.state = 'buff';
-    this.run = this.create(home, [{ set, buffs: [entry] }]); this.run.party = true;
-    this.message = 'Equipping ' + set.name + ' for a party buff.';
+    this.run = this.create(home, [{ set, buffs: [entry, ...this.extras(set, home, [entry])] }]); this.run.party = true;
+    this.message = 'Equipping ' + set.name + ' for party buffs.';
     return true;
   },
   move(source, destination) {
@@ -323,6 +348,8 @@ const BuffGear = {
     if (Manual.lastAt !== r.manualAt) { this.fail('Manual control interrupted buff swaps.'); return true; }
     if (now() - r.at > 120000) { this.fail('Buff gear cycle timed out.'); return true; }
     if (!Hunt.running && !r.party || r.signature !== this.signature()) this.cancel();
+    // Party buffs also go out while hunting is stopped; your own buffs only while hunting.
+    if (!Hunt.running) for (const q of r.queue) q.buffs = q.buffs.filter(e => e.party);
     if (r.pending) {
       const p = r.pending;
       if (!gp.inventoryPending && this.key(this.at(p.destination)) === p.from && this.key(this.at(p.source)) === p.to) r.pending = null;
@@ -362,10 +389,12 @@ const BuffGear = {
     if (r.cast) {
       const p = r.cast, remaining = p.party ? (p.entry.shows() ? 1 : 0) : World.buffRemaining(p.id);
       if (remaining > 0) { p.accepted = true; p.visible = true; }
+      // A party buff one member cannot take, or that never shows on them, does not end the change: the next one goes.
       const refused = !p.accepted && p.party && p.entry.refused?.();
-      if (refused) { this.cancel(); this.message = refused; r.cast = null; return true; }
+      if (refused) { this.message = refused; r.cast = null; return true; }
       if (now() < p.until || World.isCasting()) return true;
-      if (!p.accepted) { if (now() - p.at > 10000) { if (!p.party) this.skipped.set(p.group, { signature: r.signature, until: now() + 120000, why: 'the cast was not confirmed, trying again in two minutes' }); this.cancel(); this.message = 'Buff cast unconfirmed; restoring combat gear.'; r.cast = null; } return true; }
+      if (!p.accepted && p.party) { if (now() - p.at > 10000) r.cast = null; return true; }
+      if (!p.accepted) { if (now() - p.at > 10000) { this.skipped.set(p.group, { signature: r.signature, until: now() + 120000, why: 'the cast was not confirmed, trying again in two minutes' }); this.cancel(); this.message = 'Buff cast unconfirmed; restoring combat gear.'; r.cast = null; } return true; }
       r.effects.push(p); r.cast = null;
     }
     if (Combat.busy() || gp.inventoryPending || World.isSitting() || World.local()?.mountedOn || Loot.pressed()) return true;
@@ -383,12 +412,16 @@ const BuffGear = {
       if (this.message === 'Restoring combat gear.') this.message = (r.refused ? r.refused + ' ' : '') + 'Combat gear restored.';
       this.run = null; this.recovery = null; return true;
     }
+    // Many casts in one change: past BUFF_RUN_BUDGET_MS the rest waits for the next change, well before the timeout.
+    if (now() - r.at > BUFF_RUN_BUDGET_MS) { r.queue = []; this.message = 'Restoring combat gear; the remaining buffs go in the next change.'; return true; }
     const q = r.queue[0];
     this.message = 'Equipping ' + q.set.name + ' for buffs.';
     if (!this.equip(q.set)) return true;
     const entry = q.buffs[0];
     if (!entry) { r.queue.shift(); return true; }
-    if (entry.party ? !entry.due() : !this.due(entry.b, q.set.auto)) { q.buffs.shift(); return true; }
+    if (entry.party ? !entry.due() : !this.due(entry.b, entry.auto ?? q.set.auto, entry.early || 0)) { q.buffs.shift(); return true; }
+    entry.triedAt ??= now();
+    if (now() - entry.triedAt > 3000) { q.buffs.shift(); return true; }
     if (entry.party ? entry.cast() : Combat.cast(entry.id, World.skill(entry.id)?.targetRequired ? World.localGid() : 0)) {
       if (!entry.party) Combat.buffCastAt.set(entry.b.group, now());
       q.buffs.shift();

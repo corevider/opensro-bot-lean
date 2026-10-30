@@ -1967,6 +1967,148 @@ test('a party buff can wear the secondary weapon while hunting is stopped, then 
   assert.deepEqual(worn, [[2002, 200]], 'cast with the secondary staff');
   assert.equal(at(6), 100, 'then the primary blade'); assert.equal(f.Hunt.running, false);
 });
+// Run a weapon change for buffs to its end. Each cast shows on its target unless show(command) says otherwise.
+function batch(f, gp, show = () => true) {
+  let seen = 0;
+  for (let n = 0; n < 500; n++) {
+    f.advance(300); f.Controller.tick();
+    const p = f.BuffGear.run?.pending;
+    if (p) { const from = gp.inventory.find(i => i.slot === p.source), to = gp.inventory.find(i => i.slot === p.destination); from.slot = p.destination; if (to) to.slot = p.source; }
+    const skills = f.commands.filter(c => c.kind === 'skill');
+    for (; seen < skills.length; seen++) {
+      const s = skills[seen];
+      if (show(s, n)) gp.attachedEffects = [...(gp.attachedEffects || []), { gid: s.gid || 1, skill: s.skillId, token: 100 + seen }];
+    }
+    if (!f.BuffGear.run) return;
+  }
+  throw Error('the weapon change for buffs did not finish');
+}
+const gearMoves = f => f.commands.filter(c => c.kind === 'inventory-move').length;
+test('one weapon change casts a party buff on every member that needs it, then the weapon comes back once', () => {
+  const { f, c, gp, at, worn } = partyGear();
+  delete c.buffs[0].only;
+  f.advance(1000); f.Controller.tick(); assert.ok(f.BuffGear.run?.party);
+  batch(f, gp);
+  assert.deepEqual(worn, [[2002, 300], [2002, 300], [2002, 300]], 'Tank, Mage and the caster, all with the harp');
+  assert.deepEqual(casts(f), ['select 60', 'skill 2002 60', 'select 61', 'skill 2002 61', 'skill 2002 1']);
+  assert.equal(gearMoves(f), 2, 'the harp goes on once and the blade comes back once');
+  assert.equal(at(6), 100);
+  f.commands.length = 0; f.advance(5000); f.Controller.tick();
+  assert.equal(f.BuffGear.run, null, 'everyone has it: no second change'); assert.deepEqual(casts(f), []);
+});
+test('a party buff with less than a minute left is renewed in the same weapon change, a longer one is not', () => {
+  for (const [left, renewed] of [[30000, true], [120000, false]]) {
+    const { f, c, gp, worn } = partyGear();
+    delete c.buffs[0].only;
+    const at = f.World.simNow();
+    gp.attachedEffects = [{ gid: 61, skill: 2002, token: 7, remainingMs: left, receivedAtMs: at }, { gid: 1, skill: 2002, token: 8, remainingMs: 600000, receivedAtMs: at }];
+    f.advance(1000); f.Controller.tick(); batch(f, gp);
+    assert.equal(casts(f).includes('skill 2002 61'), renewed, `Mage with ${left / 1000} s left`);
+    assert.equal(worn.length, renewed ? 2 : 1); assert.equal(gearMoves(f), 2);
+  }
+});
+test('a member who cannot take the party buff does not end the weapon change for the others', () => {
+  const { f, c, gp, worn } = partyGear(); f.Combat.init();
+  delete c.buffs[0].only;
+  f.advance(1000); f.Controller.tick();
+  let refused = false;
+  batch(f, gp, s => {
+    if (s.gid !== 60 || refused) return true;
+    refused = true; f.bus.emit('notice', { key: 'UIIT_SKILL_USE_FAIL_OVERLAP' }); return false;
+  });
+  assert.deepEqual(casts(f).filter(x => x.startsWith('skill')), ['skill 2002 60', 'skill 2002 61', 'skill 2002 1'], 'Mage and the caster still get it');
+  assert.equal(worn.length, 3); assert.equal(gearMoves(f), 2);
+  assert.equal(f.Support.overlaps.has('Tank:901'), true);
+});
+test('your own buff on the same gear with less than a minute left is cast during a party buff weapon change', () => {
+  const { f, gp, worn } = partyGear();
+  f.World.rebuildCatalog([
+    { id: 2001, group: 900, level: 1, name: 'Heal', targetRequired: true, targets: 1 | 16 | 32 },
+    { id: 2002, group: 901, level: 1, name: 'Guard', targetRequired: true, targets: 1 | 16 | 32, actionMs: 1000, admit: { weaponKinds: [14, 255] } },
+    { id: 2003, group: 902, level: 1, name: 'Healing circle', targetRequired: false, targets: 1 },
+    { id: 2004, group: 904, level: 1, name: 'Song', targetRequired: false, targets: 1, actionMs: 1000, durationMs: 600000, admit: { weaponKinds: [14, 255] } },
+  ]);
+  gp.skills = [2001, 2002, 2003, 2004];
+  gp.buffSlots = [{ state: 'active', effect: { gid: 1, skill: 2004, remainingMs: 40000, receivedAtMs: f.World.simNow() } }];
+  f.Settings.profile.macro.buffs = [{ id: 2004, group: 904, enabled: true }];
+  f.advance(1000); f.Controller.tick(); assert.ok(f.BuffGear.run?.party, 'Guard on Tank starts the change');
+  batch(f, gp, s => {
+    if (s.skillId === 2004) gp.buffSlots = [{ state: 'active', effect: { gid: 1, skill: 2004, remainingMs: 600000, receivedAtMs: f.World.simNow() } }];
+    return true;
+  });
+  assert.deepEqual(worn, [[2002, 300], [2004, 300]], 'Guard on Tank, then your Song with the same harp');
+  assert.equal(gearMoves(f), 2);
+});
+test('an early renewal the game refuses while the member still wears the buff waits for it to run out', () => {
+  const { f, c, gp } = partyGear(); f.Combat.init();
+  delete c.buffs[0].only;
+  const t0 = f.World.simNow();
+  gp.attachedEffects = [{ gid: 61, skill: 2002, token: 7, remainingMs: 30000, receivedAtMs: t0 }, { gid: 1, skill: 2002, token: 8, remainingMs: 600000, receivedAtMs: t0 }];
+  f.advance(1000); f.Controller.tick();
+  batch(f, gp, s => {
+    if (s.gid !== 61) return true;
+    f.bus.emit('notice', { key: 'UIIT_SKILL_USE_FAIL_OVERLAP' }); return false;
+  });
+  assert.equal(f.Support.early.has('Mage:901'), true, 'Mage still wears Guard: an early renewal it does not take');
+  assert.equal(f.Support.overlaps.has('Mage:901'), false, 'not a buff that does not stack');
+  gp.attachedEffects = gp.attachedEffects.filter(e => e.gid !== 60);
+  f.commands.length = 0; f.advance(1000); f.Controller.tick(); batch(f, gp);
+  assert.deepEqual(casts(f).filter(x => x.startsWith('skill')), ['skill 2002 60'], 'the next change does not try Mage early again');
+  assert.equal(f.Combat.stuck.has('2002:61'), false, "Combat's block from the refused renewal is lifted");
+  const mage = gp.attachedEffects.find(e => e.gid === 61);
+  Object.assign(mage, { remainingMs: 2000, receivedAtMs: f.World.simNow() });
+  f.commands.length = 0; f.advance(500); f.Controller.tick();
+  assert.equal(f.BuffGear.run, null, 'with 2 s left and still worn, it is not tried again'); assert.deepEqual(casts(f), []);
+  gp.attachedEffects = gp.attachedEffects.filter(e => e.gid !== 61);
+  f.commands.length = 0; f.advance(1000); f.Controller.tick(); batch(f, gp);
+  assert.ok(casts(f).includes('skill 2002 61'), 'once it has run out, Mage gets it again');
+  assert.equal(f.Support.early.has('Mage:901'), false);
+});
+test('a refusal that is not about stacking also moves the weapon change on to the next member at once', () => {
+  const { f, c, gp } = partyGear(); f.Combat.init();
+  delete c.buffs[0].only;
+  f.advance(1000); f.Controller.tick();
+  const step = {};
+  batch(f, gp, (s, n) => {
+    step[s.gid] = n;
+    if (s.gid !== 60) return true;
+    f.World.gp.target = 60; f.bus.emit('notice', { key: 'UIIT_SKILL_USE_FAIL_WRONGDISTANCE' }); return false;
+  });
+  assert.ok(step[61] - step[60] < 10, `Mage followed within 3 s of the refusal, not after 10 s (${(step[61] - step[60]) * 0.3} s)`);
+  assert.equal(gearMoves(f), 2);
+});
+test('a long chain of casts that never show stops in time and restores the combat gear normally', () => {
+  const { f, c, gp, at } = partyGear();
+  delete c.buffs[0].only;
+  for (let i = 0; i < 6; i++) {
+    gp.social.members.push({ id: 20 + i, name: 'Extra' + i, status: 0x5a });
+    f.World.ents.set(70 + i, { gid: 70 + i, kind: 'player', name: 'Extra' + i, regionId: 1, x: 130 + i, y: 0, z: 100, appearanceState: [0, 0, 0] });
+  }
+  f.advance(1000); f.Controller.tick();
+  batch(f, gp, () => false);
+  const tried = casts(f).filter(x => x.startsWith('skill')).length;
+  assert.ok(tried >= 5 && tried < 9, `some casts, then the time budget (${tried} of 9)`);
+  assert.equal(at(6), 100, 'the blade is back'); assert.equal(f.Hunt.running, true, 'hunting goes on');
+  assert.equal(f.BuffGear.recovery, null, 'no gear left waiting for a manual restore');
+});
+test('when hunting stops in the middle, your own queued buffs are dropped and the party buffs still go out', () => {
+  const { f, gp, worn } = partyGear();
+  f.World.rebuildCatalog([
+    { id: 2001, group: 900, level: 1, name: 'Heal', targetRequired: true, targets: 1 | 16 | 32 },
+    { id: 2002, group: 901, level: 1, name: 'Guard', targetRequired: true, targets: 1 | 16 | 32, actionMs: 1000, admit: { weaponKinds: [14, 255] } },
+    { id: 2003, group: 902, level: 1, name: 'Healing circle', targetRequired: false, targets: 1 },
+    { id: 2004, group: 904, level: 1, name: 'Song', targetRequired: false, targets: 1, actionMs: 1000, durationMs: 600000, admit: { weaponKinds: [14, 255] } },
+  ]);
+  gp.skills = [2001, 2002, 2003, 2004];
+  gp.buffSlots = [{ state: 'active', effect: { gid: 1, skill: 2004, remainingMs: 40000, receivedAtMs: f.World.simNow() } }];
+  f.Settings.profile.macro.buffs = [{ id: 2004, group: 904, enabled: true }];
+  f.Settings.profile.party.support.whileStopped = true;
+  f.advance(1000); f.Controller.tick(); assert.ok(f.BuffGear.run?.party);
+  f.Hunt.running = false;
+  batch(f, gp);
+  assert.deepEqual(worn, [[2002, 300]], 'Guard on Tank only: your Song waits for hunting');
+  assert.equal(gearMoves(f), 2);
+});
 test('a party buff that cannot swap now does not hold back the others, and a primary bow keeps its arrows', () => {
   let { f, c, gp, at, worn, drive } = partyGear();
   c.buffs.push({ id: 2001, group: 900, only: 'tank' }); f.BuffGear.blocked = () => true;
