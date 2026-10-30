@@ -228,7 +228,7 @@ const DEFAULT_PROFILE = {
     },
   },
   hunt: {
-    center: null, radius: 400, chase: 700, returnToCenter: true, travel: true,
+    center: null, radius: 400, chase: 700, returnToCenter: true, travel: true, attack: true,
     classes: { normal: true, champion: true, giant: true, party: false, elite: false, unique: false, titan: false },
     levelMin: 0, levelMax: 0, include: '', exclude: '', priority: 'attackers', avoidKs: true,
     targetTimeoutS: 25,
@@ -9533,10 +9533,13 @@ Hunt.tick = function () {
     this.state = 'resting'; return;
   }
   if (Combat.buffs(true)) { this.state = 'buff'; return; }
-  if (Lure.on()) return Lure.tick();
-  const target = this.threat(current) || current || this.chooseTarget();
+  // A support character (Attack monsters off) never starts a fight, not even with what hits it: it keeps looting,
+  // its own buffs and party support, at its hunting spot or beside the member it follows.
+  const attack = H.attack !== false;
+  if (attack && Lure.on()) return Lure.tick();
+  const target = attack ? this.threat(current) || current || this.chooseTarget() : null;
   if (target) { this.engage(target); return; }
-  this.targetGid = 0; this.state = Loot.active?.petGid ? 'loot' : 'search';
+  this.targetGid = 0; this.state = !attack ? 'support only' : Loot.active?.petGid ? 'loot' : 'search';
   if (H.returnToCenter && H.center && dist2D(World.pose(), H.center) > Math.max(40, H.radius * 0.5) && now() - this.lastMoveAt > 2500) {
     // Hunting from town (dead at login and woken in town): the town cycle's own trip (services, then reverse or walk).
     if (!(dist2D(World.pose(), H.center) <= Math.max(H.radius * 1.5, 600)) && Controller.townReturn()) return;
@@ -15550,6 +15553,8 @@ const UI = {
   section_combatHuntArea(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
       host.append(this.group('Hunting area',
+        this.check('Attack monsters', () => H().attack !== false, v => H().attack = v),
+        el('p', 'Turn off for a support character: it never starts a fight, not even with monsters that hit it, and keeps picking up loot, its own buffs and Party support (heals and party buffs) at the hunting spot or beside the member it follows.', 'muted'),
         this.button('Set hunting spot here', () => { if (World.inWorld() && Hunt.setCenter()) this.toast('Hunting spot saved.'); }),
         this.number('Hunt radius (m)', () => H().radius / 10, v => H().radius = v * 10, 5, 200),
         this.number('Chase distance (m)', () => H().chase / 10, v => H().chase = v * 10, 10, 300),

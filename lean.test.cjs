@@ -2287,6 +2287,31 @@ function petFight(f) {
   return pet;
 }
 function idleFor(f, ms) { for (let t = 0; t < ms; t += 100) { f.advance(100); f.Controller.tick(); } }
+test('a support character with Attack monsters off never starts a fight, and is not stopped as stuck', () => {
+  const f = fixture(); f.Hunt.start(); let fights = 0;
+  f.Combat.fight = () => { fights++; };
+  assert.equal(f.Settings.profile.hunt.attack, true, 'attacking is on by default');
+  f.World.ents.set(30, { gid: 30, kind: 'monster', name: 'Mob', regionId: 1, x: 120, z: 100, attackFlags: 16, appearanceState: [0] });
+  f.Hunt.targetGid = 30; f.World.gp.target = 30;
+  f.Settings.profile.hunt.attack = false;
+  idleFor(f, 1000);
+  assert.equal(fights, 0, 'no fight, not even with the monster it was fighting');
+  assert.equal(f.Hunt.targetGid, 0); assert.equal(f.Hunt.state, 'support only'); assert.equal(f.Controller.mode, 'support only');
+  f.World.attackers.set(30, f.World.simNow() ?? 0);
+  idleFor(f, 240000);
+  assert.equal(fights, 0, 'a monster that hits it is not fought either');
+  assert.equal(f.AntiStuck.recoveries, 0, 'no kills is not being stuck'); assert.equal(f.Hunt.running, true);
+  assert.equal(f.commands.some(c => c.kind === 'select' && c.gid === 30 || c.kind === 'skill' && c.gid === 30), false);
+  f.Settings.profile.hunt.attack = true; f.World.attackers.set(30, f.World.simNow() ?? 0);
+  idleFor(f, 500);
+  assert.notEqual(f.Hunt.state, 'support only'); assert.equal(f.Hunt.targetGid, 30, 'attacking again once switched back on');
+});
+test('Attack monsters off also keeps luring from starting fights', () => {
+  const f = fixture(); f.Hunt.start(); let lured = 0;
+  f.Lure.on = () => true; f.Lure.tick = () => { lured++; };
+  f.Settings.profile.hunt.attack = false; idleFor(f, 1000); assert.equal(lured, 0);
+  f.Settings.profile.hunt.attack = true; idleFor(f, 300); assert.ok(lured > 0);
+});
 test('anti-stuck drops the target, then walks back, then stops after the configured recoveries', () => {
   const f = fixture(); f.Hunt.start(); idleFor(f, 1000);
   assert.equal(f.Hunt.state, 'search');
