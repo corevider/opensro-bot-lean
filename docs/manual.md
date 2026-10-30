@@ -180,6 +180,28 @@ It acts once per entry. A teleport or a town scroll is not a new entry. Pressing
 - **Connection lost while auto-start waits:** the reconnect counts the bot as running and resumes hunting once the character is back.
 - **You stop the bot during a reconnect, or just before the page reloads:** hunting does not come back when the character is back.
 
+## Starting again after the bot stops by itself
+
+Tick **Start again when the bot stops by itself** under **Settings → Behaviour** (off by default, saved per character). It is for stops nobody chose, for example a town trip that failed, a walk back that got stuck or a stop on a world change.
+
+**When it starts again**
+
+- The bot was running and stopped on its own.
+- Your last choice was Start, or you never chose (see **It remembers your last Start or Stop** above).
+- It waits 2 minutes, and also 2 minutes after your last manual move, so it does not take over while you play.
+- Then it does what **Return & hunt** does: hunting at the spot, town services in your town, or the walk back.
+- The status line counts down and names the reason it stopped.
+
+**When it does not**
+
+- **Stops you chose:** out of HP potions, bag full, **On death: Stop**, the anti-stuck and trapped limits, a trip interrupted by manual control, no saved hunting spot. These are final.
+- **A stop right after your own action in the game:** for example a scroll you read or a portal you took by hand. You moved on, so it is final.
+- **You pressed Stop:** the bot stays stopped.
+- **The character leaves the game or you change character:** a waiting retry is dropped. A reconnect or auto-start handles the next entry.
+- **The same reason twice within 30 minutes:** it stays stopped, writes a warning to the log and shows it on screen. Check the character.
+- **A fourth stop within an hour:** the same.
+- **A reconnect or an auto-start is already bringing it back:** it leaves that to them.
+
 ## The Start / stop light
 
 A small light in the left corner of **Start / stop** shows whether the bot is running:

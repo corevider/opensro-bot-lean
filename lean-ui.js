@@ -1063,11 +1063,14 @@ const UI = {
   },
   section_settingsBehaviour(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
-      this.autoStartNote = el('p', AutoStart.status(), 'muted');
+      this.autoStartNote = el('p', AutoStart.status(), 'muted'); this.retryNote = el('p', Retry.status(), 'muted');
       host.append(this.group('Behaviour',
         this.check('Start the bot when this character enters the game', () => H().autoStart, v => { H().autoStart = v; this.autoStartNote.textContent = AutoStart.status(); }),
         el('p', 'About 5 seconds after the character is in the game: at the hunting spot it starts hunting; in the town of your saved town services it does them and goes back (needs the scroll town cycle); anywhere else it walks back; dead, it revives first. Only once per entry. Stop, F8 or a reconnect cancel it. If you stopped the bot last time, it stays stopped.', 'muted'),
         this.autoStartNote,
+        this.check('Start again when the bot stops by itself', () => H().retry, v => { H().retry = v; this.retryNote.textContent = Retry.status(); }),
+        el('p', 'If the bot stops on its own while your last choice was Start (a town trip or walk back that failed, a stop on a world change), it waits 2 minutes, and 2 minutes after your last manual move, then does what Return & hunt does. Stops you chose are final: out of HP potions, bag full, On death: Stop, the stuck and trapped limits, manual control, a stop right after your own action in the game. The same reason again within 30 minutes, or a fourth stop in an hour, leaves it stopped with a warning.', 'muted'),
+        this.retryNote,
         ...(Town.autoRevive() ? [el('p', 'On death: the town cycle revives you in town and goes back (Town → Scroll town cycle).', 'muted')]
           : [this.select('On death', [['stop', 'Stop'], ['wait', 'Wait'], ['revive', 'Revive and walk back']], () => H().onDeath, v => H().onDeath = v)]),
         this.check('Rest when low', () => H().sit.enabled, v => { H().sit.enabled = v; this.draw(); }),
@@ -1273,6 +1276,7 @@ const UI = {
     if (this.is('Settings') && StatPoints.note) StatPoints.note.textContent = StatPoints.status();
     if (this.stuckNote) this.stuckNote.textContent = AntiStuck.status();
     if (this.autoStartNote) this.autoStartNote.textContent = AutoStart.status();
+    if (this.retryNote) this.retryNote.textContent = Retry.status();
     if (this.is('Party') && Trace.note) Trace.note.textContent = Trace.status();
     if (Lure.note) Lure.note.textContent = Lure.status();
     if (this.is('Party') && this.partyNote) {
