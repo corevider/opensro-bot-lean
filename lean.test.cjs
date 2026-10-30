@@ -2959,6 +2959,53 @@ test('pet recovery kits are a restock supply bought at the merchant and skipped,
   g.Town.tick(); assert.match(g.Town.message, /does not sell pet recovery kits/);
   g.Town.tick(); assert.ok(g.Town.trip && g.Town.trip.phase !== 'buy', 'a merchant without kits skips them and the trip goes on');
 });
+const GRASS = (6 << 11) | 236; // consumable 3/3/1/6: the companion revival item (Grass of life)
+function deadPetFixture() {
+  const f = townFixture(), c = f.Town;
+  c.cfg().petFull = false; c.cfg().revivePet = true;
+  c.detect = () => ({ key: 'KT' });
+  f.World.gp.inventory.push({ slot: 16, refObjId: 7001, typeFlags: 2284, quantity: 1, name: 'Wolf collar', summon: { state: 4, refObjId: 600, name: 'Wolf', rentals: [] } },
+    { slot: 17, refObjId: 7552, typeFlags: GRASS, quantity: 3, name: 'Grass of life' });
+  return f;
+}
+test('a dead pet starts a town trip and is revived with a Grass of life, then summoned again', () => {
+  assert.equal(fixture().Town.cfg().revivePet, false);
+  const f = deadPetFixture(), c = f.Town;
+  assert.equal(c.reason(), 'a pet is down');
+  let g = deadPetFixture(); g.World.gp.inventory = g.World.gp.inventory.filter(i => i.refObjId !== 7552);
+  assert.equal(g.Town.reason(), 'potions running low', 'a dead pet without a grass does not start a trip for it');
+  g = deadPetFixture(); g.Town.cfg().revivePet = false;
+  assert.equal(g.Town.reason(), 'potions running low', 'the pet revival is off by default');
+  c.begin(); assert.equal(c.trip.phase, 'pet-revive', 'the revival comes first, before the services');
+  c.tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.commands.at(-1))), { kind: 'item-use', slot: 17, revivalSlot: 16 }, 'the grass names the dead pet collar');
+  f.World.applyGameplay({ ...f.World.gp, inventory: f.World.gp.inventory.map(i => i.slot === 16 ? { ...i, summon: { ...i.summon, state: 3 } } : i.slot === 17 ? { ...i, quantity: 2 } : i) });
+  f.advance(2000); c.tick(); f.advance(2000); c.tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.commands.at(-1))), { kind: 'item-use', slot: 16 }, 'the collar is used again to summon the pet');
+  f.World.applyGameplay({ ...f.World.gp, inventory: f.World.gp.inventory.map(i => i.slot === 16 ? { ...i, summon: { ...i.summon, state: 2 } } : i), cosRecords: [...f.World.gp.cosRecords, { gid: 71, refObjId: 600, band: 3, hp: 900, status: 5, dead: false }] });
+  f.advance(2000); c.tick();
+  assert.equal(c.trip.phase, 'walk-storage', 'the services continue once the pet is back');
+});
+test('an unaccepted Grass of life never stops the town trip and rests the retry', () => {
+  const f = deadPetFixture(), c = f.Town;
+  c.begin(); assert.equal(c.trip.phase, 'pet-revive');
+  c.tick(); assert.equal(f.commands.at(-1).kind, 'item-use');
+  f.advance(13000); c.tick();
+  assert.equal(c.trip.phase, 'walk-storage', 'the trip continues without the pet');
+  assert.match(c.message, /was not accepted/);
+  assert.equal(c.reason(), 'potions running low', 'the dead pet does not start another trip at once');
+  f.advance(610000); assert.equal(c.reason(), 'a pet is down', 'retried ten minutes later');
+});
+test('a collar that vanishes while the grass is in flight is not a revival', () => {
+  const f = deadPetFixture(), c = f.Town;
+  c.begin(); c.tick(); assert.equal(f.commands.at(-1).kind, 'item-use');
+  f.World.applyGameplay({ ...f.World.gp, inventory: f.World.gp.inventory.filter(i => i.slot !== 16) });
+  f.advance(2000); c.tick();
+  assert.equal(c.trip.phase, 'pet-revive', 'a missing collar confirms nothing');
+  assert.ok(!f.commands.some(x => x.kind === 'item-use' && x.slot === 16), 'no summon is sent for it');
+  f.advance(12000); c.tick();
+  assert.equal(c.trip.phase, 'walk-storage', 'the timeout ends the attempt and the trip goes on');
+});
 function reconnectFixture() {
   const f = fixture(), sent = []; f.World.charName = 'Tester'; f.Hunt.start();
   f.Hook.post = msg => { if (msg.kind === 'session') sent.push(JSON.parse(JSON.stringify(msg.command))); };

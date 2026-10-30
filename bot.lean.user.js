@@ -215,7 +215,7 @@ const DEFAULT_PROFILE = {
     prefer: { hp: 0, mp: 0, vigor: 0, cure: 0 }, delayMs: 350,
     restock: {
       enabled: false, vendor: null, route: [], offers: [],
-      town: { enabled: false, revive: true, deathReturn: 'recall', returnBy: 'reverse', storeSox: true, sellStar: false, sellBag: false, storeLevels: '', petFull: true, petFree: 1, arrivalRadius: 500,
+      town: { enabled: false, revive: true, revivePet: false, deathReturn: 'recall', returnBy: 'reverse', storeSox: true, sellStar: false, sellBag: false, storeLevels: '', petFull: true, petFree: 1, arrivalRadius: 500,
         broken: true, wear: { on: false, pct: 15 }, noXp: { on: false, minutes: 10 }, every: { on: false, minutes: 60 }, arrival: null, storage: null, vendor: null, smith: null, gate: null,
         keep: '', store: { equipment: true, elixirs: true, powders: true, alchemy: true, others: false } },
       hp: { on: true, refObjId: 0, low: 20, target: 100 },
@@ -7293,10 +7293,15 @@ const Town = {
   // otherwise send the bot to town again and again for nothing.
   petClearable(pet) { return pet.rec.inventory.some(i => this.sellable(i) || this.eligible(i)); },
   autoRevive() { return this.cfg().enabled && this.cfg().revive; },
+  // A dead companion waits in the bag as its summoner item with summon state 4; a Grass of life
+  // (revival item) brings it back. Both are needed before the town trip is worth starting for this.
+  deadCollar() { return World.items().find(i => i.slot >= 13 && i.summon?.state === 4) || null; },
+  grass() { return World.items().find(i => ItemType.useTarget((i.typeFlags ?? 0) >>> 0) === 'revival' && (i.quantity ?? 1) > 0) || null; },
   reason() {
     const c = this.cfg(), pet = Loot.pet();
     if (World.freeBagSlots() <= 1) return 'character bag nearly full';
     if (c.petFull && pet && pet.rec.status - pet.rec.inventory.length <= c.petFree && this.petClearable(pet)) return 'pickup pet nearly full';
+    if (c.revivePet && (!this.petReviveFailedAt || now() - this.petReviveFailedAt > 600000) && this.deadCollar() && this.grass()) return 'a pet is down';
     if (this.supplies().some(s => Restock.count(s.refObjId) <= s.low)) return 'potions running low';
     if (this.ammoSupplies().some(s => this.ammoCount(s.refObjId) <= s.low)) return 'ammunition running low';
     if (c.broken && this.weaponBroken()) return 'weapon broken';
@@ -7406,6 +7411,8 @@ const Town = {
     // With bag selling on, the trip sells first, so a full bag can still make room for refills.
     if (full && !t.sellFirst) return this.fail('Returned to town; free a character bag slot for storage and refills.');
     t.order = this.order(full);
+    // A dead pet is brought back first, before the services, so it carries loot again for the rest of the trip.
+    if (this.cfg().revivePet && this.deadCollar() && this.grass()) { this.enter('pet-revive'); return; }
     this.enter('walk-' + t.order[0]);
   },
   // The services in visiting order. Potions come before repair and selling, unless bag selling is on, which sells and
@@ -7638,6 +7645,48 @@ const Town = {
     if (gp.progression?.gold === undefined || toBigInt(offer.price) * BigInt(quantity) > toBigInt(gp.progression.gold)) return skip(s, 'not enough gold');
     if (Cmd.raw({ kind: 'shop-buy', tab: offer.tab, slot: offer.slot, quantity }, 'Town: refill ' + s.kind + 's')) t.pending = { ref: s.refObjId, before, quantity, at: now() };
   },
+  // Grass of life works only in town, so the trip does this first. The revival restores the pet but
+  // leaves it unsummoned (collar state 3), so the collar is used again to summon it (state 2). A pet
+  // that cannot be brought back is never fatal to the trip: the town services continue without it.
+  revivePet() {
+    const t = this.trip, gp = World.gp;
+    const finish = () => { t.petStep = null; this.enter('walk-' + t.order[0]); };
+    const giveUp = (text, stepName) => {
+      t.petStep = null; this.petReviveFailedAt = now();
+      this.enter('walk-' + t.order[0]);
+      this.message = text; Log.warn(text); UI.toast(text, 'warn', 6000);
+      Activity.emit({ category: 'town', code: 'pet-revive-failed', text, outcome: 'refused', details: { step: stepName } });
+    };
+    if (gp.inventoryPending || World.isCasting()) return;
+    const step = t.petStep;
+    if (step && now() - step.at > 12000) return giveUp(step.step === 'grass' ? 'The Grass of life was not accepted; the pet stays dead.' : 'The pet was revived but could not be summoned again.', step.step);
+    if (step?.step === 'grass') {
+      // A vanished collar is not a success (a bag re-sort or stale slot would fake one): the collar must be
+      // there with its state off dead, or the grass stack must have shrunk under it.
+      const collar = (gp.inventory || []).find(i => i.slot === step.slot), grass = (gp.inventory || []).find(i => i.slot === step.grassSlot);
+      if (collar && (collar.summon?.state !== 4 || (grass?.quantity ?? 0) < step.grassQty)) {
+        Activity.emit({ category: 'town', code: 'pet-revived', text: 'A dead pet was revived with a Grass of life.', outcome: 'confirmed', details: { slot: step.slot } });
+        t.petStep = { step: 'summon', slot: step.slot, petRef: step.petRef, at: now() };
+      }
+      return;
+    }
+    if (step?.step === 'summon') {
+      const collar = (gp.inventory || []).find(i => i.slot === step.slot);
+      const alive = collar?.summon?.state === 2 || (gp.cosRecords || []).some(r => r && !r.dead && r.hp > 0 && r.refObjId === step.petRef);
+      if (alive) {
+        this.message = 'The pet is back.';
+        Log.info(this.message);
+        Activity.emit({ category: 'town', code: 'pet-summoned', text: 'The revived pet was summoned again.', outcome: 'confirmed', details: { slot: step.slot } });
+        return finish();
+      }
+      if (!step.sent && Cmd.itemUse(step.slot)) { step.sent = true; step.at = now(); }
+      return;
+    }
+    const collar = this.deadCollar(), grass = this.grass();
+    if (!collar) return finish();
+    if (!grass) return giveUp('No Grass of life in the bag; the pet stays dead.', 'grass');
+    if (Cmd.itemUseOnDeadPet(grass.slot, collar.slot)) t.petStep = { step: 'grass', slot: collar.slot, grassSlot: grass.slot, grassQty: grass.quantity ?? 1, petRef: collar.summon?.refObjId, at: now() };
+  },
   buy() {
     const t = this.trip, gp = World.gp, shop = Restock.activeShop();
     if (!shop || shop.npc !== this.npc('vendor')?.gid || shop.error) return this.fail(shop?.error || 'Potion merchant selection changed.');
@@ -7806,7 +7855,8 @@ const Town = {
     } else if (t.phase.startsWith('open-')) {
       const role = t.phase.slice(5), kind = role === 'storage' ? 'storage-open' : role === 'gate' ? 'npc-talk' : 'shop-open';
       if (this.open(role, kind) && this.trip) this.enter({ storage: 'store', vendor: 'buy', smith: 'sell', gate: 'reverse' }[role]);
-    } else if (t.phase === 'store') this.store();
+    } else if (t.phase === 'pet-revive') this.revivePet();
+    else if (t.phase === 'store') this.store();
     else if (t.phase === 'buy') this.buy();
     else if (t.phase === 'sell') this.sell();
     else if (t.phase === 'ammo') this.ammo();
@@ -11625,6 +11675,14 @@ Cmd.itemUseOnPet = function (slot, gid) {
   if (!item || gp.inventoryPending || World.isDead() || !this.spaced('item-use') || ItemType.useTarget((item.typeFlags ?? 0) >>> 0) !== 'companion') return false;
   if (!gp.cosRecords?.some(r => r && r.gid === gid && !r.dead && r.hp > 0)) return false;
   return this.raw({ kind: 'item-use', slot, companionGid: gid }, 'Use on pet: ' + (item.name || item.refObjId));
+};
+// A Grass of life names the dead companion's summoner item instead of a gid (worker ll(): exactly one
+// candidate; here the collar is pinned and must still be in the dead state).
+Cmd.itemUseOnDeadPet = function (slot, collarSlot) {
+  const gp = World.gp, item = gp?.inventory?.find(i => i.slot === slot), collar = gp?.inventory?.find(i => i.slot === collarSlot);
+  if (!item || !collar || gp.inventoryPending || World.isDead() || !this.spaced('item-use') || ItemType.useTarget((item.typeFlags ?? 0) >>> 0) !== 'revival') return false;
+  if (collar.slot < 13 || collar.summon?.state !== 4) return false;
+  return this.raw({ kind: 'item-use', slot, revivalSlot: collarSlot }, 'Revive pet: ' + (item.name || item.refObjId));
 };
 // Player potions keep their priority: the pet kit is only considered when none was used this tick.
 const playerPotionTick = Potion.tick;
@@ -15626,9 +15684,11 @@ const UI = {
         this.check('On a timer', () => town().every.on, v => town().every.on = v),
         this.number('Every (minutes)', () => town().every.minutes, v => town().every.minutes = v, 5, 600),
         this.check('Revive in town and go back to the hunting spot', () => town().revive, v => town().revive = v),
+        this.check('Revive a dead pet with a Grass of life', () => town().revivePet, v => town().revivePet = v),
         this.select('After death, reverse to', [['recall', 'Last return-scroll location (hunting area)'], ['death', 'Death location']], () => town().deathReturn, v => { town().deathReturn = v; Activity.emit({category:'settings',code:'reverse-choice-changed',text:'Revival reverse destination changed to ' + v + '.',details:{choice:v === 'death' ? 3 : 2}}); }),
         el('p', 'Service trips reverse to their departure point. After death, use the selected destination. A missing game destination stops the trip; it never substitutes another point. Without a reverse scroll, or with Back to the hunting spot set to Walk, the trip walks back to the saved hunting spot instead.', 'muted'),
-        el('p', 'Worn gear means the most worn repairable item you are wearing, measured against its own maximum durability; the trip repairs it. A broken weapon (0 durability) has its own switch, on by default. The XP and timer clocks run only while hunting and restart with every trip.', 'muted')));
+        el('p', 'Worn gear means the most worn repairable item you are wearing, measured against its own maximum durability; the trip repairs it. A broken weapon (0 durability) has its own switch, on by default. The XP and timer clocks run only while hunting and restart with every trip.', 'muted'),
+        el('p', 'A dead pet waits in your bag as its summoner item. With this on, a town trip starts for it and, once in town, uses a Grass of life from your bag to revive it and summons it again before the services. Carry the grass: stable-keepers sell it, the bot does not buy it.', 'muted')));
   },
   section_townCycle(host) {
     const H = () => Settings.profile.hunt, M = () => Settings.profile.macro, P = () => Settings.profile.potion, C = () => Restock.cfg();
