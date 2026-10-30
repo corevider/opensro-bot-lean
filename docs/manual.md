@@ -172,6 +172,24 @@ Tick **Start the bot when this character enters the game** under **Settings → 
 
 It acts once per entry. A teleport or a town scroll is not a new entry. Pressing **Stop all**, **F8** or **Start / stop** before it fires cancels it for that entry, and after a reconnect the reconnect decides, so a bot you had stopped stays stopped. Without a saved hunting spot it does nothing and tells you. The status line shows what it is waiting for.
 
+**It remembers your last Start or Stop.** The bot keeps, per character and across reloads, whether you last started it (**F8**, **Start / stop**, **Return & hunt**, **Start training**) or stopped it (**F8**, **Start / stop**, **Stop all**, **Stop training**).
+
+- **You stopped it last:** auto-start leaves the character stopped on the next entry and says so.
+- **You started it last, or never chose:** auto-start starts it.
+- **Stops the bot makes by itself** do not change the choice and do not cancel an auto-start that is waiting. Examples: a world transition, a page reload or the settings loading after login.
+- **Connection lost while auto-start waits:** the reconnect counts the bot as running and resumes hunting once the character is back.
+- **You stop the bot during a reconnect, or just before the page reloads:** hunting does not come back when the character is back.
+
+## The Start / stop light
+
+A small light in the left corner of **Start / stop** shows whether the bot is running:
+
+- **Green:** hunting, also while dead and waiting to revive.
+- **Yellow:** a town trip, a walk back, a reconnect or other bot work.
+- **Grey:** stopped.
+
+Point at the button to read the state.
+
 ## Automatic reconnect
 
 This is always on; there is no switch. When the connection to the game is lost (a server restart, a network drop), the bot waits for the game's own retries, then asks the game to resume, and if that fails re-enters the world with the login the page already holds, exactly like pressing Enter at character select. It keeps trying every few seconds, then every 30 seconds, for up to 12 hours. It never types or stores your password: if the login itself is gone after a restart, the status line says so and the bot waits for you.

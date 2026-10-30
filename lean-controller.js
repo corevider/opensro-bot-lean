@@ -104,8 +104,9 @@ Hunt.tick = function () {
   }
 };
 
+// Stops everything, for the player and for the bot itself. A pending auto-start survives it: only the player's own
+// Stop (userStop) cancels that.
 function stopAll() {
-  AutoStart.cancel('Auto-start cancelled.');
   Town.record('stop');
   Alchemy.stop();
   Trade.cancel();

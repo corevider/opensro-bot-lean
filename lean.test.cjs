@@ -3,7 +3,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/bot.lean.user.js', 'utf8');
 const isolated = source.slice(0, source.lastIndexOf('installWorkerHook();')) +
-  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, Travel, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Stall, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, boot, Ticker, Sound, LeanMap};\n})();';
+  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, Travel, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Stall, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, userStop, RunIntent, boot, Ticker, Sound, LeanMap};\n})();';
 function fixture(document) {
   let time = 100000;
   const storage = new Map(), commands = [], notices = [], intervals = [], timers = [];
@@ -5814,7 +5814,7 @@ test('auto-start is off by default; on, it starts hunting at the spot once the g
   assert.equal(f.Hunt.running, false, 'waits for the game to settle'); assert.match(f.Diagnostics.main(), /^Auto-start: starting in \d s\.$/);
   f.advance(5000); f.Controller.tick();
   assert.equal(f.Hunt.running, true); assert.match(f.AutoStart.message, /hunting started at the hunting spot/);
-  f.stopAll(); f.advance(10000); f.Controller.tick(); assert.equal(f.Hunt.running, false, 'a stop by the player holds for this entry');
+  f.stopAll(); f.advance(10000); f.Controller.tick(); assert.equal(f.Hunt.running, false, 'a stop holds for this entry');
   f.bus.emit('phase', 'entering-world', 'world', false); f.advance(10000); f.Controller.tick();
   assert.equal(f.Hunt.running, false, 'a teleport is not a new entry');
   f.World.phase = 'character'; f.bus.emit('phase', 'character', 'world', true); f.Controller.tick(); f.World.phase = 'world';
@@ -5825,7 +5825,7 @@ test('auto-start waits out manual control and gives way to the player and to a r
   let f = autoStartFixture(); f.Controller.tick(); f.advance(4000); manualMove(f);
   f.advance(1500); f.Controller.tick(); assert.equal(f.Hunt.running, false); assert.match(f.AutoStart.message, /manual-control pause/);
   f.advance(6000); f.Controller.tick(); assert.equal(f.Hunt.running, true, 'starts once the manual pause is over');
-  f = autoStartFixture(); f.Controller.tick(); f.stopAll(); f.advance(10000); f.Controller.tick();
+  f = autoStartFixture(); f.Controller.tick(); f.userStop(); f.advance(10000); f.Controller.tick();
   assert.equal(f.Hunt.running, false); assert.match(f.AutoStart.message, /cancelled/);
   f = autoStartFixture(); f.Controller.tick(); f.toggleBot(); assert.equal(f.Hunt.running, true);
   f.Controller.tick(); assert.equal(f.AutoStart.entry, null, 'started by the player: nothing left to do');
@@ -5833,6 +5833,52 @@ test('auto-start waits out manual control and gives way to the player and to a r
   for (let i = 0; i < 6; i++) { r.f.advance(4000); r.f.Controller.tick(); }
   assert.equal(r.f.Hunt.running, false, 'the player had stopped the bot; the reconnect owns this entry and does not start it');
   assert.match(r.f.AutoStart.message, /reconnect/);
+});
+function heroAutoStart() {
+  const f = autoStartFixture(), center = f.Hunt.cfg().center;
+  f.World.charName = 'Hero'; f.Settings.useCharacter('Hero'); Object.assign(f.Settings.profile.hunt, { autoStart: true, center });
+  const enter = () => { f.World.phase = 'character'; f.bus.emit('phase', 'character', 'world', true); f.World.phase = 'world'; f.Controller.tick(); f.advance(5000); f.Controller.tick(); };
+  return { f, enter };
+}
+test('auto-start follows the last Start or Stop the player chose, kept per character across reloads', () => {
+  let { f, enter } = heroAutoStart(); f.Controller.tick(); f.advance(5000); f.Controller.tick();
+  assert.equal(f.Hunt.running, true, 'no choice saved yet: it starts as before');
+  f.toggleBot(); assert.equal(f.Hunt.running, false);
+  assert.equal(JSON.parse(f.storage.get('sroBotLean:v1:run:Hero')).on, false);
+  enter(); assert.equal(f.Hunt.running, false, 'the player stopped it: it stays stopped');
+  assert.match(f.AutoStart.message, /you stopped the bot last time/);
+  f.toggleBot(); assert.equal(f.Hunt.running, true); f.stopAll();
+  enter(); assert.equal(f.Hunt.running, true, 'stopped by the bot itself, last chosen Start: it starts again');
+  f.userStop(); f.World.charName = 'Other'; f.RunIntent.set(true); f.World.charName = 'Hero';
+  enter(); assert.equal(f.Hunt.running, false, 'the choice belongs to the character');
+});
+test('a stop the bot makes by itself does not cancel an auto-start that is waiting', () => {
+  const { f } = heroAutoStart(); f.Controller.tick(); f.advance(2000);
+  f.stopAll(); f.bus.emit('phase', 'entering-world', 'world', false); f.Controller.tick();
+  assert.ok(f.AutoStart.pending(), 'still waiting for the game to settle');
+  f.advance(4000); f.Controller.tick();
+  assert.equal(f.Hunt.running, true); assert.match(f.AutoStart.message, /hunting started/);
+});
+test('a connection lost while an auto-start waits is resumed after the reconnect', () => {
+  const r = reconnectFixture(); autoStartFixture(r.f); r.f.Hunt.stop(); r.f.AutoStart.entry = { at: 0 };
+  r.lose(); assert.equal(r.f.Reconnect.intent.hunting, true);
+});
+test('a stop by the player during a reconnect, or before a reload, is not undone when the character is back', () => {
+  const r = reconnectFixture(); r.f.Reconnect.snapAt = 0; r.f.Reconnect.snapshot();
+  const snap = () => JSON.parse(r.f.storage.get('sro-lean-reload')).snap;
+  assert.equal(snap().hunting, true);
+  r.lose(); assert.equal(r.f.Reconnect.intent.hunting, true);
+  r.f.userStop(); assert.equal(r.f.Reconnect.intent.hunting, false); assert.equal(snap().hunting, false);
+  r.back(); for (let i = 0; i < 6; i++) { r.f.advance(4000); r.f.Controller.tick(); }
+  assert.equal(r.f.Hunt.running, false); assert.equal(r.f.Reconnect.active(), false);
+});
+test('the Start / stop button shows whether the bot is running', () => {
+  const f = fixture(), led = f.UI.runLed = { dataset: {}, parentNode: { title: '' } };
+  f.UI.updateRunLed(); assert.equal(led.dataset.state, 'stop'); assert.match(led.parentNode.title, /stopped/);
+  f.Hunt.start(); f.UI.updateRunLed(); assert.equal(led.dataset.state, 'ok'); assert.match(led.parentNode.title, /running: Hunting/);
+  f.World.isDead = () => true; f.UI.updateRunLed(); assert.equal(led.dataset.state, 'ok', 'dead while started: still started');
+  f.World.isDead = () => false; f.WalkBack.active = true; f.UI.updateRunLed(); assert.equal(led.dataset.state, 'busy');
+  f.WalkBack.active = false; f.Hunt.stop(); f.UI.updateRunLed(); assert.equal(led.dataset.state, 'stop');
 });
 test('auto-start in the town of the saved services does the town services, then reverses to the hunting spot', () => {
   const f = townFixture(); autoStartFixture(f); f.Hunt.stop();
