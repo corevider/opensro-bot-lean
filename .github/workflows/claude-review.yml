@@ -10,7 +10,7 @@ on:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false && !contains(fromJSON('["Rebraxin","corevider","claude[bot]","app/claude","nixxane"]'), github.event.pull_request.user.login)
+    if: github.event.pull_request.draft == false && !contains(fromJSON('["Rebraxin","corevider","duan78","claude[bot]","app/claude","nixxane"]'), github.event.pull_request.user.login)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:

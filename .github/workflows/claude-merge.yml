@@ -19,7 +19,7 @@ on:
 jobs:
   merge:
     # Only people with write access and this repo's workflows can start workflow_dispatch.
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false && contains(fromJSON('["Rebraxin","corevider","claude[bot]","app/claude","nixxane"]'), github.event.pull_request.user.login)
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false && contains(fromJSON('["Rebraxin","corevider","duan78","claude[bot]","app/claude","nixxane"]'), github.event.pull_request.user.login)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
