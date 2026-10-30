@@ -2238,12 +2238,30 @@ test('auto-resurrect needs a fallen party member whose corpse is in view', () =>
   const f = fixture(), mate = resurrection(f);
   f.World.ents.delete(50); f.Controller.tick(); assert.equal(f.commands.length, 0);
   f.World.ents.set(50, { gid: 50, kind: 'player', name: 'Mate', regionId: 1, x: 110, y: 0, z: 100, appearanceState: [0] });
-  f.Controller.tick(); assert.equal(f.commands.length, 0);
-  f.World.ents.get(50).appearanceState = [2]; f.advance(800); f.Controller.tick();
+  f.World.hpSeen.set(50, 120); f.Controller.tick(); assert.equal(f.commands.length, 0, 'standing, and the server HP says alive');
+  f.World.hpSeen.delete(50); f.World.ents.get(50).appearanceState = [2]; f.advance(31000); f.Controller.tick();
   assert.equal(f.commands.length, 2);
   mate.status = 10; f.advance(7000); f.Controller.tick(); mate.status = 0;
   f.World.ents.get(50).name = 'Stranger'; f.advance(800); f.Controller.tick(); assert.equal(f.commands.length, 2);
   f.World.ents.get(50).name = 'Mate'; f.advance(800); f.Controller.tick(); assert.equal(f.commands.length, 4);
+});
+test('auto-resurrect offers the rebirth to a member who died out of view and is drawn standing on return', () => {
+  const f = fixture(), mate = resurrection(f);
+  f.World.ents.get(50).appearanceState = [1, 0, 0];
+  f.Controller.tick();
+  assert.deepEqual(casts(f), ['select 50', 'skill 10067 50'], 'party list at 0 and no HP that says otherwise: the server decides');
+  assert.ok(f.Log.lines.some(l => /Mate is at 0 HP in the party list but shown standing; offering resurrection/.test(l.text)));
+  f.advance(2000); f.Controller.tick(); assert.equal(casts(f).length, 2, 'one offer per answer window');
+  f.advance(30000); f.Controller.tick(); assert.equal(casts(f).length, 4, 'refused or unanswered: offered again after the window');
+  mate.status = 10; f.advance(7000); f.Controller.tick(); assert.equal(casts(f).length, 4, 'revived: nothing more');
+});
+test('auto-resurrect leaves a standing member alone when the server reports it alive', () => {
+  const f = fixture(); resurrection(f);
+  f.World.ents.get(50).appearanceState = [1, 0, 0]; f.World.applyEvent({ kind: 'hp-seed', gid: 50, hp: 80 });
+  f.Controller.tick(); assert.deepEqual(casts(f), [], 'alive with little HP (0 tenths in the party list): no rebirth');
+  f.World.applyEvent({ kind: 'hp-seed', gid: 50, hp: 0 }); f.advance(20000); f.Controller.tick();
+  assert.deepEqual(casts(f), [], 'not looked at again for 30 s');
+  f.advance(11000); f.Controller.tick(); assert.deepEqual(casts(f), ['select 50', 'skill 10067 50'], 'then the server HP of 0 counts');
 });
 test('auto-resurrect idles without a learned corpse-targeted skill', () => {
   const f = fixture(); resurrection(f);

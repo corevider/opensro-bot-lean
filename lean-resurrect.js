@@ -3,14 +3,26 @@
 // (core.ts), so the corpse is selected immediately before the press. The server
 // proposes the revival, which the dead member answers inside a 30 second window.
 // Only in-range corpses are considered when authored range is available.
+// After a teleport or walking back into view the game can draw a dead player standing. The party list (HP in tenths)
+// then still says 0, so a standing member at 0 counts as dead unless the server's own HP for the body says otherwise
+// (sent when a player comes into view). The server does not send HP for a selected player, so it decides by taking or
+// refusing the Rebirth; a refusal (nearly dead, not dead) waits for the answer window like an unanswered offer.
+const RES_ALIVE_MS = 30000; // a standing member the server reports alive is checked again after this
 const Resurrect = {
   sent: {},           // member id -> time of the unanswered proposal
+  checked: {},        // member id -> time until which a standing member counts as alive
   nextAt: -Infinity,  // earliest next attempt
   holdUntil: 0,
   trip: null,
   windowMs: 31000,    // the server's answer window plus one tick
   message: 'No fallen party member.',
-  reset() { this.cancelTrip('', true); this.sent = {}; this.nextAt = -Infinity; this.holdUntil = 0; this.message = 'No fallen party member.'; },
+  reset() { this.cancelTrip('', true); this.sent = {}; this.checked = {}; this.nextAt = -Infinity; this.holdUntil = 0; this.message = 'No fallen party member.'; },
+  // Whether a party member at 0 HP in the party list is dead: a corpse, or a standing body without known HP above 0.
+  dead(e) {
+    if (e.appearanceState?.[0] === 2) return true;
+    const hp = World.hpOf(e.gid);
+    return !isNum(hp) || hp === 0;
+  },
   cancelTrip(message = '', halt = false) {
     if (this.trip && halt && this.trip.phase === 'approach') this.sent[this.trip.member] = now();
     if (this.trip && halt && World.inWorld() && !World.isDead()) Cmd.move(World.pose());
@@ -30,7 +42,7 @@ const Resurrect = {
     const member = members.find(m => m.id === a.member && m.name === a.name);
     const body = World.ents.get(a.gid);
     if (a.phase === 'cast') this.returnTrip();
-    if (a.phase === 'approach' && (!member || (member.status & 15) !== 0 || !body || body.name !== a.name || body.appearanceState?.[0] !== 2 ||
+    if (a.phase === 'approach' && (!member || (member.status & 15) !== 0 || !body || body.name !== a.name || !this.dead(body) ||
         !Number.isFinite(dist2D(a.home, body)) || dist2D(a.home, body) > Settings.profile.party.resRadius)) {
       this.returnTrip('Resurrection target unavailable or outside the configured radius; returning.');
     }
@@ -96,9 +108,9 @@ const Resurrect = {
     if (!Array.isArray(members)) { this.cancelTrip('', true); return false; }
     const party = members.filter(m => m && m.id && m.name && m.name !== social.localName);
     const t = now();
-    for (const id of Object.keys(this.sent)) {
+    for (const list of [this.sent, this.checked]) for (const id of Object.keys(list)) {
       const m = party.find(x => x.id === Number(id));
-      if (!m || (m.status & 15) !== 0) delete this.sent[id];
+      if (!m || (m.status & 15) !== 0) delete list[id];
     }
     const offered = party.find(m => this.sent[m.id]);
     this.message = offered ? 'Resurrection offered: ' + offered.name + '; waiting for the answer.' : 'Watching for fallen party members.';
@@ -109,14 +121,16 @@ const Resurrect = {
     if (World.isCasting() || World.isSitting() || World.local()?.mountedOn || World.gp.inventoryPending ||
         now() - Combat.lastCastAt < Settings.profile.macro.castGapMs || !Combat.mpOk(skill.id, World.me())) return !!this.trip;
     for (const m of party) {
-      if ((m.status & 15) !== 0 || this.sent[m.id] && t - this.sent[m.id] < this.windowMs) continue;
+      if ((m.status & 15) !== 0 || this.sent[m.id] && t - this.sent[m.id] < this.windowMs || this.checked[m.id] > t) continue;
       // The corpse must be in view as an entity to aim the select at.
       const e = [...World.ents.values()].find(x => x && x.kind === 'player' && x.name === m.name);
-      if (!e || e.appearanceState?.[0] !== 2) continue;
+      if (!e) continue;
+      if (!this.dead(e)) { this.checked[m.id] = t + RES_ALIVE_MS; continue; }
       if (this.trip && e.gid !== this.trip.gid) continue;
       const distance = dist2D(World.pose(), e);
       const home = this.trip?.home || (Hunt.running && Settings.profile.hunt.center) || World.pose();
       if (!Number.isFinite(distance) || dist2D(home, e) > c.resRadius) continue;
+      if (e.appearanceState?.[0] !== 2 && this.sent[m.id] === undefined) Log.info(m.name + ' is at 0 HP in the party list but shown standing; offering resurrection.');
       if (Loot.active && !Loot.active.petGid) {
         if (!Cmd.move(World.pose())) return false;
         Loot.suspend();

@@ -139,6 +139,12 @@ On the **Party** page tick **Buff and heal party members** (off by default). The
 
 It casts only on members you can see within **Support range (m)** (30 by default) and never walks to them. HP is exact for members in view and in tenths otherwise, as the game's party window shows it. A buff that does not appear on the member after two tries waits a minute before the next. It runs while hunting; tick **Also while hunting is stopped** to support a party while you stand still. For a character that only supports, untick **Attack monsters** (Combat → Hunt area). It then never starts a fight, not even with monsters that hit it, and while hunting it keeps picking up loot, its own buffs and party support, at the hunting spot or beside the member it follows (**Following a party member**). Town trips, revival and the walk back work as usual, and the anti-stuck watchdog does not count the time without kills. The top of the page lists the party with HP and MP bars, distance and which assigned buffs each member has. The party matching, resurrection and recruit options are on the same page.
 
+## Resurrecting party members
+
+Tick **Auto-resurrect party members** on the **Party** page to cast your learned Rebirth skill on a dead party member in view. The party list shows HP in tenths, so 0 there can also mean nearly dead.
+
+A member who died while out of view is often drawn standing when you get back to them, because the game only shows deaths it saw. A standing member at 0 in the party list therefore counts as dead, unless the HP the server sent when the player came into view says otherwise. The bot casts Rebirth and the server decides: a nearly dead member refuses it, and the offer is not repeated within its 30-second answer window. A member the server's HP shows alive is checked again after 30 seconds.
+
 ## Accepting resurrection
 
 Tick **Accept resurrection from party members** on the **Party** page. When you are dead and a party member casts Rebirth on you, the bot answers Yes, whether or not hunting is running. Offers from players outside your party, and mutation offers, are left to you. The switch is off by default and saved per character.
