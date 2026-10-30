@@ -1,6 +1,14 @@
 const AUTO_START_SETTLE_MS = 5000;
 const AUTO_START_NAV_MS = 20000;
 const AUTO_START_GIVE_UP_MS = 120000;
+// What the player last chose with Start or Stop, kept per character across reloads. Stops the bot makes by itself
+// (a world transition, a reload, a settings load) never change it. Auto-start follows it: a character the player
+// stopped stays stopped when it enters the game again.
+const RunIntent = {
+  key() { return World.charName ? 'run:' + World.charName : ''; },
+  stopped() { const key = this.key(); return !!key && Store.get(key, null)?.on === false; },
+  set(on) { const key = this.key(); if (key) Store.set(key, { on: !!on, at: Date.now() }); },
+};
 const AutoStart = {
   armed: true, entry: null, message: '',
   on() { return !!Settings.profile.hunt.autoStart; },
@@ -34,6 +42,7 @@ const AutoStart = {
     if (now() - entry.at > AUTO_START_GIVE_UP_MS) return this.cancel('Auto-start gave up: the game did not settle within 2 minutes.');
     if (World.charName && Settings.profileKey !== 'profile:' + World.charName) { this.message = 'Auto-start: waiting for the character settings.'; return; }
     if (!this.on()) { this.entry = null; return; }
+    if (RunIntent.stopped()) return this.cancel('Auto-start: you stopped the bot last time, so it stays stopped. Press Start / stop to hunt.');
     if (!Hunt.cfg().center) {
       this.cancel('Auto-start: no hunting spot is saved. Set one in Combat → Hunt area (Training place in the Classic window).');
       return UI.toast(this.message, 'warn', 6000);

@@ -200,7 +200,11 @@ const UI = {
     this.body = el('div', null, 'body'); this.status = el('div', 'Waiting for game…', 'status'); this.status.setAttribute('role', 'status');
     this.updateNote = el('div', '', 'update-note'); this.updateNote.hidden = true;
     Updates.render();
-    const controls = this.row(this.button('Start / stop · F8', () => toggleBot()), this.button('Return & hunt', () => WalkBack.start(true)), this.button('Stop all', () => stopAll()), this.button('Session', () => this.showSession()));
+    const start = this.button('Start / stop · F8', () => toggleBot());
+    // A light in the button's corner: green while hunting, yellow during a town trip, walk back or other bot work.
+    this.runLed = el('span', null, 'run-led'); this.runLed.setAttribute('aria-hidden', 'true'); start.prepend(this.runLed);
+    const returnHunt = () => { WalkBack.start(true); if (WalkBack.active || Travel.active) RunIntent.set(true); };
+    const controls = this.row(start, this.button('Return & hunt', returnHunt), this.button('Stop all', () => userStop()), this.button('Session', () => this.showSession()));
     controls.classList.add('controls');
     this.nav = el('nav'); this.nav.setAttribute('aria-label', 'Bot settings');
     this.buildNav();
@@ -249,6 +253,13 @@ const UI = {
       : Restock.recording ? 'Recording route: ' + Restock.draft.route.length + ' points' : '';
     const reason = note || (this.waitNote?.textContent || '').split('\n')[0];
     return { key: dead || error ? 'stop' : busy ? 'busy' : Hunt.running ? 'ok' : 'stop', label, dead, note, reason };
+  },
+  // Started or stopped, whatever the character is doing: a dead character the bot will revive is still started.
+  updateRunLed() {
+    if (!this.runLed) return;
+    const state = this.botState(), key = state.key === 'busy' ? 'busy' : Hunt.running ? 'ok' : 'stop';
+    this.runLed.dataset.state = key;
+    this.runLed.parentNode.title = 'Bot ' + (key === 'stop' ? 'stopped' : 'running: ' + state.label);
   },
   // Wide window: status strip on top, page list on the left, session numbers on the right, activity log below.
   // The pages themselves are the same as in the compact window. A global choice, kept with the window position.
@@ -1055,7 +1066,7 @@ const UI = {
       this.autoStartNote = el('p', AutoStart.status(), 'muted');
       host.append(this.group('Behaviour',
         this.check('Start the bot when this character enters the game', () => H().autoStart, v => { H().autoStart = v; this.autoStartNote.textContent = AutoStart.status(); }),
-        el('p', 'About 5 seconds after the character is in the game: at the hunting spot it starts hunting; in the town of your saved town services it does them and goes back (needs the scroll town cycle); anywhere else it walks back; dead, it revives first. Only once per entry. Stop, F8 or a reconnect cancel it.', 'muted'),
+        el('p', 'About 5 seconds after the character is in the game: at the hunting spot it starts hunting; in the town of your saved town services it does them and goes back (needs the scroll town cycle); anywhere else it walks back; dead, it revives first. Only once per entry. Stop, F8 or a reconnect cancel it. If you stopped the bot last time, it stays stopped.', 'muted'),
         this.autoStartNote,
         ...(Town.autoRevive() ? [el('p', 'On death: the town cycle revives you in town and goes back (Town → Scroll town cycle).', 'muted')]
           : [this.select('On death', [['stop', 'Stop'], ['wait', 'Wait'], ['revive', 'Revive and walk back']], () => H().onDeath, v => H().onDeath = v)]),
@@ -1255,7 +1266,7 @@ const UI = {
     Reports.render();
     const diagnosticState = Diagnostics.sample();
     if (this.waitNote) this.waitNote.textContent = this.waitNote.title = Diagnostics.lines(diagnosticState);
-    this.updateOrb(); this.updateWide();
+    this.updateOrb(); this.updateWide(); this.updateRunLed();
     if (this.townNote) this.townNote.textContent = Town.status();
     if (this.is('Settings') && AutoMastery.note) AutoMastery.note.textContent = AutoMastery.status();
     if (this.is('Settings') && AutoMastery.maxNote) AutoMastery.maxNote.textContent = AutoMastery.maxMessage;

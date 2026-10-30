@@ -28,7 +28,7 @@ const Reconnect = {
     this.snapAt = now();
     const data = this.load();
     this.gaveUp = false;
-    this.save({ ...data, reloads: null, snap: { character: World.charName, hunting: !!(Hunt.running || Town.trip || WalkBack.active || this.intent?.hunting), at: Date.now() } });
+    this.save({ ...data, reloads: null, snap: { character: World.charName, hunting: this.busy() || !!this.intent?.hunting, at: Date.now() } });
   },
   reloadStreak() {
     const r = this.load().reloads;
@@ -84,10 +84,18 @@ const Reconnect = {
 
   active() { return !!this.intent; },
   clear(message = '') { this.intent = null; this.attempts = 0; this.nextAt = this.waitUntil = this.backAt = this.expiredAt = 0; this.message = message; },
+  // The player stopped the bot: a reconnect in progress, or a reload from the saved snapshot, must not bring hunting back.
+  forgetHunting() {
+    if (this.intent) this.intent.hunting = false;
+    const data = this.load();
+    if (data.snap?.hunting) this.save({ ...data, snap: { ...data.snap, hunting: false } });
+  },
+  // Whether the bot is working, or about to: an auto-start waiting for the game to settle counts.
+  busy() { return !!(Hunt.running || Town.trip || WalkBack.active || AutoStart.pending()); },
   // The connection was lost while the bot may have been working: remember what to restore.
   lost() {
     if (!World.charName) return;
-    const busy = !!(Hunt.running || Town.trip || WalkBack.active);
+    const busy = this.busy();
     if (!this.intent) { this.intent = { character: World.charName, hunting: busy, since: now() }; this.attempts = 0; this.nextAt = now() + 2000; this.message = 'Connection lost; waiting for the game to reconnect.'; Log.warn('Connection lost; reconnecting automatically.'); }
     else if (busy) this.intent.hunting = true;
     this.backAt = 0;
