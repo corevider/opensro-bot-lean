@@ -211,15 +211,17 @@ const Controller = {
       Restock.sample();
       Alchemy.tick();
       BuffGear.resume();
+      // Party automation runs in every state, dead or busy included: the game refuses an application to your party
+      // that is not answered within 10 seconds.
+      this.guard('Party', () => Party.tick());
       if (BuffGear.run) {
-        if (World.inWorld()) { Party.tick(); Potion.tick(); }
+        if (World.inWorld()) Potion.tick();
         if (BuffGear.tick()) { this.mode = 'buff gear'; return; }
       }
-      if (Alchemy.run || Alchemy.pending) { if (World.inWorld()) Party.tick(); this.mode = 'alchemy'; return; }
-      if (Stall.run) { if (World.inWorld()) { Party.tick(); Potion.tick(); } Stall.tick(); this.mode = 'stall'; return; }
+      if (Alchemy.run || Alchemy.pending) { this.mode = 'alchemy'; return; }
+      if (Stall.run) { if (World.inWorld()) Potion.tick(); Stall.tick(); this.mode = 'stall'; return; }
       if (World.inWorld() && World.isDead() && Hunt.running) {
         Town.cancel(); Resurrect.cancelTrip(); Resurrect.holdUntil = 0;
-        Party.acceptResurrection();
         Hunt.tick(); this.mode = Hunt.state; return;
       }
       if (World.inWorld() && !World.isDead() && (this.resumeAfterRevive || Hunt.running && Hunt.deathAt)) {
@@ -229,7 +231,6 @@ const Controller = {
         } else this.returnAfterRevive();
       }
       if (Town.trip) {
-        if (World.inWorld()) Party.tick();
         // Reserve the first settled item-use window for departure. Continuing
         // alternating potions first can perpetually renew the 350 ms hold.
         if (Town.trip.phase !== 'recall' || !Town.trip.potionWindowReserved || World.isCasting() || World.gp?.inventoryPending) Potion.tick();
@@ -237,7 +238,6 @@ const Controller = {
         if (Town.tick()) { this.mode = 'town service'; return; }
       }
       if (!World.inWorld()) { this.mode = 'waiting'; return; }
-      Party.tick();
       Party.resumeTick();
       AutoMastery.tick();
       StatPoints.tick();
