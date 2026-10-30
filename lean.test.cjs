@@ -3,7 +3,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(__dirname + '/bot.lean.user.js', 'utf8');
 const isolated = source.slice(0, source.lastIndexOf('installWorkerHook();')) +
-  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, Travel, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Stall, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, userStop, RunIntent, boot, Ticker, Sound, LeanMap};\n})();';
+  'globalThis.bot = {AutoStart, RenderControl, Activity, World, Settings, Updates, Diagnostics, Reports, Alchemy, BuffGear, Icons, Hook, Cmd, Hunt, Loot, Restock, Trade, WalkBack, Navigation, ClipRoute, Route, RouteCheck, Learned, Display, Wardrobe, WdData, LeanWardrobe, Controller, UI, Stats, Combat, Potion, Party, Town, Travel, bus, Manual, Resurrect, Support, ItemRules, SpeedScroll, RepairHammer, Stall, Log, AntiStuck, Chase, Trap, botProfile, ItemRules, Items, AutoMastery, StatPoints, ProfileShare, Setup, Trace, DEFAULT_PROFILE, PetPotion, Reconnect, Reconnect, Lure, stopAll, toggleBot, userStop, RunIntent, Retry, boot, Ticker, Sound, LeanMap};\n})();';
 function fixture(document) {
   let time = 100000;
   const storage = new Map(), commands = [], notices = [], intervals = [], timers = [];
@@ -5909,6 +5909,70 @@ test('auto-start away from the spot outside town walks back; dead it revives fir
   f = fixture(); f.World.charName = 'Hero'; f.Controller.tick(); f.advance(121000); f.Controller.tick();
   assert.equal(f.AutoStart.entry, null, 'a profile that never loads still gives up');
   assert.match(f.AutoStart.message, /gave up/);
+});
+function retryFixture(on = true) {
+  const f = fixture(); f.Settings.profile.hunt.retry = on; f.Hunt.start(); f.Controller.tick();
+  const stop = reason => { f.Hunt.stop(reason); f.Controller.tick(); };
+  return { f, stop };
+}
+test('the bot starts again 2 minutes after it stopped by itself, only when asked to', () => {
+  let { f, stop } = retryFixture(false);
+  assert.equal(f.DEFAULT_PROFILE.hunt.retry, false, 'off by default');
+  stop('Town cycle stopped: Inventory transaction timed out.'); f.advance(130000); f.Controller.tick();
+  assert.equal(f.Hunt.running, false);
+  ({ f, stop } = retryFixture());
+  stop('Town cycle stopped: Inventory transaction timed out.');
+  assert.match(f.Diagnostics.main(), /stopped by itself \(Town cycle stopped: Inventory transaction timed out\.\); starting again in 120 s/);
+  f.advance(119000); f.Controller.tick(); assert.equal(f.Hunt.running, false);
+  f.advance(2000); f.Controller.tick(); assert.equal(f.Hunt.running, true, 'does what Return & hunt does');
+  assert.match(f.Retry.message, /^Started again/);
+});
+test('a stop the player chose, or the player stopping the bot, is never undone by the retry', () => {
+  for (const reason of ['out of HP potions', 'inventory full', 'character died', 'stuck: no progress after 3 recoveries', 'Town cycle stopped: Manual control interrupted the trip.',
+    'Town cycle stopped: Character died during town service.', 'Town cycle stopped: No saved hunting point to return to; set the hunting area first.']) {
+    const { f, stop } = retryFixture(); stop(reason); f.advance(130000); f.Controller.tick();
+    assert.equal(f.Hunt.running, false, reason); assert.match(f.Retry.message, /final/, reason);
+  }
+  const { f } = retryFixture(); f.World.charName = 'Hero'; f.userStop(); f.Controller.tick(); f.advance(130000); f.Controller.tick();
+  assert.equal(f.Hunt.running, false, 'the player pressed Stop');
+});
+test('the retry waits for the player to stop moving, and gives up on the same reason twice or a fourth stop in an hour', () => {
+  let { f, stop } = retryFixture();
+  stop('Walk back stopped: no progress towards the hunting spot.');
+  f.advance(100000); manualMove(f); f.advance(100000); f.Controller.tick(); assert.equal(f.Hunt.running, false, 'the player moved 100 s in');
+  f.advance(21000); f.Controller.tick(); assert.equal(f.Hunt.running, true, '2 minutes after the last manual move');
+  stop('Walk back stopped: no progress towards the hunting spot.'); f.advance(130000); f.Controller.tick();
+  assert.equal(f.Hunt.running, false, 'the same reason again within 30 minutes');
+  assert.ok(f.notices.some(n => /stopped again for the same reason/.test(n)));
+  ({ f, stop } = retryFixture());
+  for (const n of [1, 2, 3]) { stop('Town cycle stopped: reason ' + 'ABC'[n - 1] + '.'); f.advance(121000); f.Controller.tick(); assert.equal(f.Hunt.running, true, 'try ' + n); }
+  stop('Town cycle stopped: reason D.'); f.advance(130000); f.Controller.tick();
+  assert.equal(f.Hunt.running, false); assert.match(f.Retry.message, /4 times in an hour/);
+});
+test('a pending retry is dropped by Stop all, a character change or leaving the world', () => {
+  for (const how of ['stop', 'character', 'left']) {
+    const { f, stop } = retryFixture(); stop('Town cycle stopped: Inventory transaction timed out.'); assert.ok(f.Retry.stop, how);
+    if (how === 'stop') { f.World.charName = 'Hero'; f.userStop(); }
+    if (how === 'character') f.bus.emit('character', 'Other');
+    if (how === 'left') { f.bus.emit('phase', 'character', 'world', true); f.World.phase = 'world'; }
+    f.Controller.tick(); f.advance(130000); f.Controller.tick();
+    assert.equal(f.Hunt.running, false, how); assert.equal(f.Retry.stop, null, how);
+  }
+});
+test('a stop on a world change is retried, unless the player had just acted in the game', () => {
+  const change = f => { f.bus.emit('phase', 'entering-world', 'world', false); f.stopAll(); f.Controller.tick(); };
+  let { f } = retryFixture(); change(f);
+  assert.equal(f.Retry.stop.reason, 'world change'); f.advance(121000); f.Controller.tick(); assert.equal(f.Hunt.running, true);
+  ({ f } = retryFixture()); f.advance(60000);
+  f.Hook.observers.forEach(fn => fn({ kind: 'gameplay', command: { kind: 'item-use', slot: 13 } })); f.advance(5000); change(f);
+  f.advance(130000); f.Controller.tick();
+  assert.equal(f.Hunt.running, false, 'a scroll read by hand: the player moved on'); assert.match(f.Retry.message, /your own action/);
+});
+test('the retry also follows a walk back that failed after a town trip', () => {
+  const f = fixture(); f.Settings.profile.hunt.retry = true; f.World.gp.pose.x = 1800;
+  f.WalkBack.start(true); assert.ok(f.WalkBack.active); f.Controller.tick();
+  f.WalkBack.cancel('Walk back stopped: path blocked or travel timed out.'); f.Controller.tick();
+  assert.match(f.Retry.message, /path blocked or travel timed out\.\); starting again in/);
 });
 test('a walk that starts on a blocked tile or against a wall steps out to open ground first, never through the wall', () => {
   const wall = { x: 0, y: 0, z: 0, yaw: 0, mesh: { vertices: [200,0,0,200,0,1920], edges: [0,1,0,65535,3,0] } };
