@@ -322,6 +322,17 @@ Before it retries, two things happen on their own. If the character stands where
 - **"No walkable route found":** save that service point again from open ground a few steps in front of the NPC (stop hunting, stand there, select the NPC and click its Save button).
 - **"Blocked route (no progress for 20 s)":** something is physically in the way; check the character is not stuck behind another player or object.
 
+## If a sale, purchase or deposit gets no answer
+
+Sometimes the game never answers a sale, purchase or warehouse move, or the result does not show up in the bag within 15 seconds. The game's replies carry no request number, so the bot never sends the same command again: a late answer could sell or buy twice. Instead it continues in four steps:
+
+1. It waits for the game to finish the inventory action. The status line says "waiting for the game to finish the last inventory action".
+2. It closes the open shop or warehouse window.
+3. It starts that service again (the warehouse, the potion merchant or the repair merchant) from what the bag and the pet hold now. An item that was already sold is not offered again, and potions are bought only up to the refill target. An item whose deposit did not happen is deposited first.
+4. If the game is still busy after a minute, the bot reloads the page, and the reconnect enters the world again. With **Revive in town and go back to the hunting spot** on, it then does the town services from where the character stands. With it off, it resumes hunting as after any reconnect. The bot reloads for this at most once in 30 minutes: if the game hangs again within that time, the trip stops.
+
+The second time this happens in the same trip, the trip stops with "Town cycle stopped: Inventory transaction timed out. No repeat command sent." In that case, reload the game and check the bag before hunting again. An error the game reports still stops the trip at once, as before. The one exception is a sale the merchant refuses: that item is kept and the rest is sold.
+
 ## Sharing and importing settings
 
 Under **Settings → Share and import settings**, **Copy share code** or **Save share file** makes a short code or a file holding only the settings you changed from the defaults, ready to post in Discord. A share never contains your hunting spot, town and merchant points, walking routes, buff weapon sets or wardrobe, so it works on any character. To import, paste a code or **Open file…** and press **Preview import**: it lists exactly which settings would change and nothing happens until you press **Apply import**. Your own positions, town points, buff weapon sets and wardrobe are kept, and **Undo last import** brings your previous settings back. Files that are not a share, contain unsafe keys or are too large are refused. **Export full backup (with my positions)** saves everything, including your positions, for your own use.

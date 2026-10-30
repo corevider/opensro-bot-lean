@@ -191,7 +191,7 @@ const Diagnostics = {
       joinRequest: !!matching?.request, acceptanceSent: !!matching?.request && Party.answered === `${matching.request.a}:${matching.request.b}:${matching.request.expires}`,
       requestRemainingMs: Number.isFinite(World.simNow()) && Number.isFinite(matching?.request?.expires) ? Math.max(0, matching.request.expires - World.simNow()) : null,
       townActive: !!Town.trip,
-      townPhase: ['recall', 'recall-wait', 'revive-arrival', 'walk-arrival', 'walk-storage', 'open-storage', 'store', 'close-storage', 'walk-vendor', 'open-vendor', 'buy', 'close-vendor', 'walk-smith', 'open-smith', 'sell', 'repair', 'close-smith', 'walk-gate', 'open-gate', 'reverse', 'reverse-wait', 'leave'].includes(Town.trip?.phase) ? Town.trip.phase : null,
+      townPhase: ['recall', 'recall-wait', 'revive-arrival', 'walk-arrival', 'walk-storage', 'open-storage', 'store', 'close-storage', 'walk-vendor', 'open-vendor', 'buy', 'close-vendor', 'walk-smith', 'open-smith', 'sell', 'repair', 'close-smith', 'walk-gate', 'open-gate', 'reverse', 'reverse-wait', 'leave', 'settle'].includes(Town.trip?.phase) ? Town.trip.phase : null,
       scrollAttempts: this.number(Town.trip?.scrollAttempts), scrollAccepted: !!Town.trip?.scrollRequest?.accepted,
       returnScroll: !!Town.scroll(0x09ec), reverseScroll: !!Town.scroll(0x19ec),
       settings: { autoRecruit: !!c.party.autoRecruit, autoAccept: !!c.party.autoAcceptMatching,

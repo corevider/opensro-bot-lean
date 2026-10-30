@@ -3,6 +3,13 @@
 // Native travel-gate type 5 spends the reverse scroll: choice 2 recalls, choice 3 returns to death.
 // See OpenSRO action/reversereturn.go, 6FEF10 and 5DA1B0's choice rows.
 const TOWN_REVERSE = { recall: 2, death: 3 };
+// An inventory transaction the game never answered: how long to wait for the game to settle before reloading the page.
+const TOWN_SETTLE_MS = 60000;
+// Such a reload is done at most once in this time, so a game that never answers cannot reload the page in a loop.
+// The time of the last one is kept in localStorage under TOWN_STALL_KEY, across the reload.
+const TOWN_STALL_RELOAD_GAP_MS = 30 * 60000, TOWN_STALL_KEY = 'sro-lean-town-stall-reload';
+// The service each transaction phase belongs to, to start it over after a stalled transaction.
+const TOWN_SERVICE_OF = { store: 'storage', buy: 'vendor', sell: 'smith', ammo: 'smith' };
 const Town = {
   trip: null, lastScrollPoint: null, deathPoint: null, message: 'Town cycle off.',
   // Clocks for the "no XP for N minutes" and "every N minutes" triggers. They run only while hunting, alive and in
@@ -536,15 +543,55 @@ const Town = {
     const t = this.trip, p = t.pending;
     if (!p) return true;
     if (World.gp.inventoryPending || now() - p.at < 500) {
-      if (now() - p.at > 15000) this.fail('Inventory transaction timed out. No repeat command sent.');
+      if (now() - p.at > 15000) this.stalled('Inventory transaction timed out.');
       return false;
     }
     if (check(p)) {
       Activity.emit({ category: 'town', code: 'inventory-confirmed', text: 'Town ' + t.phase + ': inventory result observed.', outcome: 'confirmed', operationId: Activity.contexts.town?.id, details: { quantity: p.quantity } });
       t.pending = null; return true;
     }
-    if (World.gp.error || now() - p.at > 15000) this.fail(World.gp.error || 'Transaction was not confirmed. No repeat command sent.');
+    if (World.gp.error) this.fail(World.gp.error);
+    else if (now() - p.at > 15000) this.stalled('Transaction was not confirmed.');
     return false;
+  },
+  // A transaction the game never answered. Sending it again could sell or buy twice, so nothing is repeated: the trip
+  // waits for the game to settle, closes the window and starts this service over from what the bag and pet hold now.
+  // A game that never settles is reloaded, and the reconnect picks the trip up after it. A second stall in the same
+  // trip stops it, as before.
+  stalled(reason) {
+    const t = this.trip, service = TOWN_SERVICE_OF[t.phase], lost = t.pending;
+    if (!service || t.stalls) return this.fail(reason + ' No repeat command sent.');
+    t.stalls = 1;
+    this.enter('settle');
+    t.resume = 'walk-' + service; t.lost = lost;
+    this.message = 'Town cycle: ' + reason + ' Nothing is sent again; waiting for the game, then starting the ' + this.role(service) + ' over.';
+    Log.warn(this.message);
+  },
+  settle() {
+    const t = this.trip, gp = World.gp;
+    if (gp.inventoryPending) {
+      if (now() - t.at < TOWN_SETTLE_MS) { this.message = 'Town cycle: waiting for the game to finish the last inventory action.'; return; }
+      let last = 0;
+      try { last = Number(window.localStorage.getItem(TOWN_STALL_KEY)) || 0; } catch {}
+      if (Date.now() - last < TOWN_STALL_RELOAD_GAP_MS) return this.fail('The game did not finish an inventory action, again after a reload. Reload the game and check the bag.');
+      try { window.localStorage.setItem(TOWN_STALL_KEY, String(Date.now())); } catch {}
+      Log.warn('Town cycle: the game did not finish an inventory action in a minute; reloading the page.');
+      this.trip = null;
+      if (!Reconnect.reloadPage()) this.fail('The game did not finish an inventory action, and the page is not reloaded again.');
+      return;
+    }
+    if (Restock.activeShop() || gp.storage) {
+      if (!t.sent) { if (Cmd.raw({ kind: 'npc-close' }, 'Town: close NPC after a stalled transaction')) { t.sent = true; t.at = now(); } }
+      else if (now() - t.at > 15000) this.fail('NPC window did not close after a stalled transaction.');
+      return;
+    }
+    // A pet item whose move to the bag never happened is still in the pet: the warehouse picks it from there again.
+    // An item whose deposit never happened is still in the bag: it is deposited first, as pet loot staged there would be.
+    const bag = World.items(), inBag = (slot, ref) => bag.some(i => i.slot === slot && i.refObjId === ref), lost = t.lost;
+    if (t.staged && !inBag(t.staged.slot, t.staged.ref)) t.staged = null;
+    if (lost?.kind === 'store' && inBag(lost.source, lost.ref)) t.staged = { slot: lost.source, ref: lost.ref };
+    Log.info('Town cycle: the game has settled; starting the ' + this.role(t.resume) + ' over.');
+    this.enter(t.resume);
   },
   store() {
     const t = this.trip, gp = World.gp, st = gp.storage;
@@ -844,7 +891,8 @@ const Town = {
     } else if (t.phase.startsWith('open-')) {
       const role = t.phase.slice(5), kind = role === 'storage' ? 'storage-open' : role === 'gate' ? 'npc-talk' : 'shop-open';
       if (this.open(role, kind) && this.trip) this.enter({ storage: 'store', vendor: 'buy', smith: 'sell', gate: 'reverse' }[role]);
-    } else if (t.phase === 'pet-revive') this.revivePet();
+    } else if (t.phase === 'settle') this.settle();
+    else if (t.phase === 'pet-revive') this.revivePet();
     else if (t.phase === 'store') this.store();
     else if (t.phase === 'buy') this.buy();
     else if (t.phase === 'sell') this.sell();
