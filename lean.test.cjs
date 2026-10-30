@@ -1842,6 +1842,69 @@ test('party buffs honour the member list, back off after two misses and never wa
   f.advance(10000); f.Controller.tick(); assert.equal(casts(f).length, 0, 'out of range: nothing cast');
   assert.equal(f.commands.some(c => c.kind === 'move' && c.destination?.x === 600), false, 'and no walking to the member');
 });
+// Tank wears Earth Fire Protection (3001), which the server says Guard (2002) cannot overlap.
+function overlapping() {
+  const f = fixture(), c = support(f);
+  f.World.rebuildCatalog([
+    { id: 2001, group: 900, level: 1, name: 'Heal', targetRequired: true, targets: 1 | 16 | 32 },
+    { id: 2002, group: 901, level: 1, name: 'Guard', targetRequired: true, targets: 1 | 16 | 32 },
+    { id: 2003, group: 902, level: 1, name: 'Healing circle', targetRequired: false, targets: 1 },
+    { id: 3001, group: 950, level: 1, name: 'Earth Fire Protection', targetRequired: true, targets: 1 | 16 | 32 },
+  ]);
+  c.enabled = true; f.World.gp.social.members[1].status = 0x5a; c.buffs = [{ id: 2002, group: 901 }];
+  f.World.gp.attachedEffects = [{ gid: 60, skill: 3001, token: 9 }];
+  f.Combat.init(); // as in the game: the refusal notice also blocks the skill for the selected member
+  return { f, c };
+}
+test('a party buff the game refuses as "cannot overlap" skips that member and still reaches the others', () => {
+  const { f } = overlapping();
+  f.advance(1000); f.Controller.tick(); assert.deepEqual(casts(f), ['select 60', 'skill 2002 60'], 'Tank first');
+  f.World.gp.target = 60; f.bus.emit('notice', { key: 'UIIT_SKILL_USE_FAIL_OVERLAP' });
+  assert.ok(f.Log.lines.some(l => /Tank has a buff that Guard does not stack with; skipping Tank until it ends/.test(l.text)));
+  assert.equal(f.Combat.stuck.has('2002:60'), true, 'Combat counts the refusal against Tank, as in the game');
+  f.commands.length = 0; f.advance(2000); f.Controller.tick();
+  assert.deepEqual(casts(f), ['select 61', 'skill 2002 61'], 'Tank is still selected, but Mage gets the buff');
+  assert.equal(f.Combat.stuck.has('2002:60'), false, 'the refusal no longer blocks Guard for self buffs and the rotation');
+  f.World.gp.attachedEffects.push({ gid: 61, skill: 2002, token: 2 }); f.commands.length = 0;
+  f.advance(2000); f.Controller.tick(); assert.deepEqual(casts(f), ['skill 2002 1'], 'then the caster');
+  f.World.gp.attachedEffects.push({ gid: 1, skill: 2002, token: 3 }); f.commands.length = 0;
+  f.advance(60000); f.Controller.tick(); assert.deepEqual(casts(f), [], 'Tank is skipped while it wears Earth Fire Protection');
+  assert.match(f.Support.message, /Skipped \(a buff that does not stack\): Tank/);
+  assert.equal(f.Log.lines.some(l => /did not show on Tank/.test(l.text)), false, 'no "did not show" warnings for a refused member');
+  f.World.gp.attachedEffects = f.World.gp.attachedEffects.filter(e => e.skill !== 3001);
+  f.advance(1000); f.Controller.tick(); assert.deepEqual(casts(f), ['skill 2002 60'], 'its protection ended: Tank (still selected) is tried again');
+});
+test('only an overlap refusal right after a party buff marks the member', () => {
+  const { f } = overlapping();
+  f.advance(1000); f.Controller.tick(); assert.deepEqual(casts(f), ['select 60', 'skill 2002 60']);
+  f.bus.emit('notice', { key: 'UIIT_SKILL_USE_FAIL_WRONGDISTANCE' });
+  assert.equal(f.Support.overlaps.size, 0, 'another refusal is not an overlap');
+  Object.assign(f.Combat, { lastCastId: 2003, lastCastGid: 0 }); f.bus.emit('notice', { key: 'UIIT_SKILL_USE_FAIL_OVERLAP' });
+  assert.equal(f.Support.overlaps.size, 0, 'another skill was cast after the party buff: the refusal is not ours');
+  f.Support.reset(); f.commands.length = 0; f.advance(60000); f.Controller.tick();
+  f.advance(3000); f.bus.emit('notice', { key: 'UIIT_SKILL_USE_FAIL_OVERLAP' });
+  assert.equal(f.Support.overlaps.size, 0, 'too late to belong to the party buff');
+  f.Support.reset(); f.commands.length = 0; f.advance(60000); f.Controller.tick();
+  f.bus.emit('notice', { key: 'UIIT_STT_SKILL_USE_FAIL_OVERLAP_COUNT' });
+  assert.equal(f.Support.overlaps.size, 1, 'too many buffs on the member counts as well');
+  f.Support.reset(); assert.equal(f.Support.overlaps.size, 0, 'a reset forgets it');
+});
+test('a member refused without a visible buff to wait for is tried again after a minute', () => {
+  const { f } = overlapping();
+  f.World.gp.attachedEffects = [];
+  f.advance(1000); f.Controller.tick(); f.bus.emit('notice', { key: 'UIIT_SKILL_USE_FAIL_OVERLAP' });
+  f.World.gp.attachedEffects = [{ gid: 61, skill: 2002, token: 2 }, { gid: 1, skill: 2002, token: 3 }]; f.commands.length = 0;
+  f.advance(30000); f.Controller.tick(); assert.deepEqual(casts(f), [], 'skipped for now');
+  f.advance(31000); f.Controller.tick(); assert.deepEqual(casts(f), ['select 60', 'skill 2002 60'], 'tried again a minute later');
+});
+test('a heal refused for one member still goes to another low member', () => {
+  const f = fixture(), c = support(f);
+  c.enabled = true; c.heal = { id: 2001, group: 900, pct: 95, self: false }; f.Combat.init();
+  f.advance(1000); f.Controller.tick(); assert.deepEqual(casts(f), ['select 60', 'skill 2001 60'], 'Tank at 40% first');
+  f.World.gp.target = 60; f.bus.emit('notice', { key: 'UIIT_SKILL_USE_FAIL_WRONGDISTANCE' });
+  f.commands.length = 0; f.advance(2000); f.Controller.tick();
+  assert.deepEqual(casts(f), ['select 61', 'skill 2001 61'], 'Tank is blocked for now, Mage at 90% is healed');
+});
 // Party buff Guard (2002) on Tank only, a worn blade (one-handed) and a harp in the bag.
 function partyGear() {
   const f = fixture(), c = support(f), gp = f.World.gp;
@@ -1874,6 +1937,24 @@ test('a party buff that needs another weapon is cast after a swap, then the weap
   assert.equal(at(6), 100, 'the blade is back'); assert.equal(f.Hunt.running, true);
   f.World.gp.attachedEffects = [{ gid: 60, skill: 2002, token: 1 }]; f.commands.length = 0;
   f.advance(2000); f.Controller.tick(); assert.equal(f.BuffGear.run, null, 'Tank has it: no more swaps'); assert.deepEqual(casts(f), []);
+});
+test('a party buff swap ends at once when the member cannot take the buff', () => {
+  const { f, gp, at } = partyGear();
+  f.advance(1000); f.Controller.tick(); assert.ok(f.BuffGear.run?.party);
+  let after = -1;
+  for (let n = 0; n < 80 && f.BuffGear.run; n++) {
+    f.advance(300); f.Controller.tick();
+    const p = f.BuffGear.run?.pending;
+    if (p) { const from = gp.inventory.find(i => i.slot === p.source), to = gp.inventory.find(i => i.slot === p.destination); from.slot = p.destination; if (to) to.slot = p.source; }
+    if (after >= 0) after++;
+    else if (f.BuffGear.run?.cast) { f.bus.emit('notice', { key: 'UIIT_SKILL_USE_FAIL_OVERLAP' }); after = 0; }
+  }
+  assert.equal(f.BuffGear.run, null, 'the swap is over');
+  assert.ok(after >= 0 && after <= 10, `the gear came back within 3 s of the refusal (took ${after} ticks), not after the 10 s cast wait`);
+  assert.equal(at(6), 100, 'the blade is back'); assert.equal(f.Hunt.running, true);
+  assert.ok(f.Log.lines.some(l => /Tank has a buff that Guard does not stack with/.test(l.text)));
+  f.commands.length = 0; f.advance(5000); f.Controller.tick();
+  assert.equal(f.BuffGear.run, null, 'no new swap for Tank'); assert.deepEqual(casts(f), []);
 });
 test('a party buff can wear the secondary weapon while hunting is stopped, then the primary comes back', () => {
   const { f, c, gp, at, worn, drive } = partyGear();
