@@ -5460,6 +5460,28 @@ test('attribute stones: several attributes are worked down the list and a change
   f.fuse(17, { 1: 7, 4: 25 }); assert.match(f.Alchemy.log.at(-1).text, /Phy\. reinforce: 0% → 22% \(also changed: Phy\. attack power 0% → 80%\)/);
   f.advance(1500); f.Controller.tick(); assert.equal(f.Alchemy.run, null, 'the other stat already reached its target');
 });
+test('attribute stones: a stat without stones is passed over, the next one is done, and the end names what ran out', () => {
+  const f = attributeFixture({ NATTR_PASTR: 7, NATTR_PA: 13 });
+  f.World.gp.inventory = f.World.gp.inventory.filter(i => i.slot !== 17);
+  f.Alchemy.startAttributes(); f.Controller.tick();
+  assert.deepEqual(sent(f), { kind: 'alchemy-start', mode: 'attribute', slots: [13, 16] }, 'no Phy. reinforce stone: Phy. attack power is fused');
+  assert.match(f.Alchemy.log.at(-1).text, /No Phy\. reinforce stone of degree 9 in the bag; going on with Phy\. attack power/);
+  f.fuse(16, { 4: 13 }); f.advance(1500); f.Controller.tick();
+  assert.equal(f.Alchemy.run, null); assert.match(f.Alchemy.message, /^No Phy\. reinforce stone of degree 9 in the bag\./);
+  assert.equal(f.commands.filter(c => c.mode === 'attribute').length, 1);
+});
+test('attribute stones: when the stones of one stat run out on the way, the next stat is done', () => {
+  const f = attributeFixture({ NATTR_PASTR: 13, NATTR_PA: 13 });
+  f.World.gp.inventory = f.World.gp.inventory.map(i => i.slot === 17 ? { ...i, quantity: 1 } : i);
+  f.Alchemy.startAttributes(); f.Controller.tick(); assert.deepEqual(sent(f).slots, [13, 17]);
+  f.fuse(17, { 1: 7 }); f.advance(1500); f.Controller.tick();
+  assert.deepEqual(sent(f).slots, [13, 16], 'Phy. reinforce is out of stones at 22%: Phy. attack power next');
+  f.fuse(16, { 1: 7, 4: 13 }); f.advance(1500); f.Controller.tick();
+  assert.equal(f.Alchemy.run, null); assert.match(f.Alchemy.message, /No Phy\. reinforce stone/);
+  const g = attributeFixture({ NATTR_PASTR: 13, NATTR_PA: 13 }); g.World.gp.inventory = g.World.gp.inventory.filter(i => i.slot !== 16 && i.slot !== 17);
+  g.Alchemy.startAttributes(); g.Controller.tick();
+  assert.equal(g.Alchemy.run, null); assert.match(g.Alchemy.message, /No Phy\. reinforce or Phy\. attack power stone of degree 9 in the bag/);
+});
 test('attribute stones: need a target, a matching stone and respect the stone limit', () => {
   const none = attributeFixture({}); none.Alchemy.startAttributes(); assert.equal(none.Alchemy.run, null); assert.match(none.Alchemy.message, /at least one attribute/);
   const missing = attributeFixture(); missing.World.gp.inventory = missing.World.gp.inventory.filter(i => i.slot !== 16);

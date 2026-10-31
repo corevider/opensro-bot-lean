@@ -77,17 +77,21 @@ const Alchemy = {
   attrValues(item) { return Object.fromEntries(this.attributes(this.kind(item)).map(a => [a.name, this.attrValue(item, a.index)])); },
   attrTarget(name, cfg = this.cfg()) { return Math.min(31, Math.max(0, Math.floor(Number(cfg.attr?.targets?.[name])) || 0)); },
   attrPercent(value) { return Math.floor(value * 100 / 31); },
-  // The first attribute below its wanted value, with a bag stone of the item's degree.
+  // The first attribute below its wanted value that has a bag stone of the item's degree. Attributes without one are
+  // passed over (`skipped`), so the others are still done; with none left to fuse, `missing` names the stones that ran out.
   nextAttr(item, cfg = this.cfg()) {
-    const degree = this.degree(item);
+    const degree = this.degree(item), skipped = [];
     for (const a of this.attributes(this.kind(item))) {
       const target = this.attrTarget(a.name, cfg);
       if (!target || this.attrValue(item, a.index) >= target) continue;
       const ref = ALCHEMY_DATA.attrStones[a.name] + degree - 1;
       const stone = World.items().find(i => i.refObjId === ref && (i.typeFlags & 0xfffe) === 0x15ec && i.quantity > 0 && i.slot >= 13);
-      return stone ? { attr: a, item: stone } : { missing: `No ${ATTRIBUTE_LABEL[a.name]} stone of degree ${degree} in the bag.` };
+      if (stone) return { attr: a, item: stone, skipped };
+      skipped.push(a.name);
     }
-    return null;
+    if (!skipped.length) return null;
+    const names = skipped.map(name => ATTRIBUTE_LABEL[name]);
+    return { missing: `No ${names.length > 1 ? names.slice(0, -1).join(', ') + ' or ' + names.at(-1) : names[0]} stone of degree ${degree} in the bag.`, skipped };
   },
   // About how many stones one wanted value takes: a fusion works half the time (the stone's own chance, before skill and
   // avatar bonuses) and then the new value reaches step k only when all four rolls do, ((6 - k) / 6)^4, if the item allows it.
@@ -205,7 +209,7 @@ const Alchemy = {
     this.run = { kind: 'attr', slot: item.slot, identity: this.identity(item), shape: JSON.stringify([item.slot, item.refObjId, item.typeFlags]), fingerprint: this.fingerprint(item), stonesOnly: false,
       cfg: JSON.parse(JSON.stringify(c)), config: JSON.stringify(c), manualAt: Manual.lastAt, character: World.charName,
       attempts: 0, successes: 0, failures: 0, destroyed: 0, highest: item.plus, elixirs: 0, powders: 0, stoneAttempts: 0, stoneFailures: 0, attrFused: 0,
-      stonesUsed: { luck: 0, steady: 0, immortal: 0, astral: 0 }, nextAt: now(), opening: null };
+      stonesUsed: { luck: 0, steady: 0, immortal: 0, astral: 0 }, nextAt: now(), opening: null, skipped: [] };
     this.result = this.run; this.message = 'Preparing attribute stones.';
     this.note(`Started attribute stones on ${item.name || Items.name(item.refObjId)}.`);
   },
@@ -325,6 +329,10 @@ const Alchemy = {
       const next = this.nextAttr(item, r.cfg);
       if (!next) return this.stop('Every wanted percentage is reached.');
       if (next.missing) return this.stop(next.missing);
+      for (const name of next.skipped.filter(name => !(r.skipped ||= []).includes(name))) {
+        r.skipped.push(name);
+        this.note(`No ${ATTRIBUTE_LABEL[name]} stone of degree ${this.degree(item)} in the bag; going on with ${ATTRIBUTE_LABEL[next.attr.name]}.`);
+      }
       const cap = Math.max(1, Math.floor(Number(r.cfg.attr?.limit) || 100));
       if (r.stoneAttempts >= cap) return this.stop(`Stopped after ${cap} attribute stones (your limit).`);
       const slots = [item.slot, next.item.slot];
@@ -396,7 +404,7 @@ const Alchemy = {
     UI.attrRows = el('div'); UI.attrNote = el('p', '', 'muted'); attrs.append(UI.attrRows, UI.attrNote);
     attrs.append(UI.number('Stop after this many attribute stones', () => c().attr.limit, n => c().attr.limit = n, 1, 1000),
       UI.row(UI.button('Fuse attribute stones', () => this.startAttributes()), UI.button('Stop', () => this.stop())),
-      el('p', 'Pick the lowest percentage you want for each stat of the item selected above, then start. The bot fuses attribute stones of the item\'s degree until every picked stat reaches its target, working down the list. Every successful fusion rolls the stat again, so it can also come out lower, and it can re-roll another stat of the item. The chance is 50% per stone before bonuses, and the higher steps get rare fast: 80% and 100% can take hundreds of stones. The item\'s own limit may stop it ever reaching the higher steps, so set a stone limit.', 'muted'));
+      el('p', 'Pick the lowest percentage you want for each stat of the item selected above, then start. The bot fuses attribute stones of the item\'s degree until every picked stat reaches its target, working down the list. A stat whose stones run out, or that has none in the bag, is passed over and the next one is done; it stops when no picked stat below its target has stones left. Every successful fusion rolls the stat again, so it can also come out lower, and it can re-roll another stat of the item. The chance is 50% per stone before bonuses, and the higher steps get rare fast: 80% and 100% can take hundreds of stones. The item\'s own limit may stop it ever reaching the higher steps, so set a stone limit.', 'muted'));
     UI.pane.append(attrs);
     const results = UI.group('Results');
     UI.alchemyStats = el('p', '', 'muted'); UI.alchemyLog = el('p', '', 'muted');
