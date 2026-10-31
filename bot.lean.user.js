@@ -13728,13 +13728,20 @@ const Alchemy = {
   // The plus from which a helper is used.
   from(kind, cfg = this.cfg()) { return Math.max(0, Number(cfg.from?.[kind]) || 0); },
   // The next stone to fuse: the first kind still below its wanted count, with a bag stone of the weapon's degree.
+  // The game takes an Astral charge only while the weapon has more Immortal charges than Astral ones (refusal 0x24),
+  // so an Immortal stone goes first when needed, even below Immortal's own plus or with Immortal not ticked.
   nextStone(item, cfg = this.cfg(), plus = Infinity) {
     const degree = this.degree(item);
+    const bagStone = kind => World.items().find(i => i.refObjId === STONES[kind].base + degree - 1 && (i.typeFlags & 0xfffe) === 0x3dec && i.quantity > 0 && i.slot >= 13);
     for (const kind of this.wanted(cfg).filter(k => plus >= this.from(k, cfg))) {
       const want = this.keep(kind, cfg), have = this.attributeCount(item, STONES[kind].option);
       if (have >= want) continue;
-      const ref = STONES[kind].base + degree - 1;
-      const stone = World.items().find(i => i.refObjId === ref && (i.typeFlags & 0xfffe) === 0x3dec && i.quantity > 0 && i.slot >= 13);
+      const immortal = this.attributeCount(item, STONES.immortal.option);
+      if (kind === 'astral' && immortal <= have) {
+        const stone = bagStone('immortal');
+        return stone ? { kind: 'immortal', item: stone, count: immortal, forAstral: true } : { missing: 'immortal', forAstral: true };
+      }
+      const stone = bagStone(kind);
       return stone ? { kind, item: stone, count: have } : { missing: kind };
     }
     return null;
@@ -13970,7 +13977,7 @@ const Alchemy = {
       return;
     }
     const need = this.nextStone(item, r.cfg, r.stonesOnly ? Infinity : item.plus);
-    if (need?.missing) return this.stop(`No ${STONES[need.missing].label} stone of degree ${this.degree(item)} in the bag.`);
+    if (need?.missing) return this.stop(`No ${STONES[need.missing].label} stone of degree ${this.degree(item)} in the bag` + (need.forAstral ? '; each Astral charge needs an Immortal charge first.' : '.'));
     if (need) {
       const cap = Math.max(0, Math.floor(Number(r.cfg.stoneLimit) || 0));
       if (cap && r.stoneAttempts >= cap) return this.stop(`Stopped after ${cap} stone fusions (your limit).`);
@@ -13981,7 +13988,7 @@ const Alchemy = {
         r.stoneAttempts++;
         this.pending = { run: r, state: gp, before: gp.alchemy, at: now(), plus: item.plus,
           stone: { kind: need.kind, ref: need.item.refObjId, before: Restock.count(need.item.refObjId), count: need.count } };
-        this.message = `Fusing a ${STONES[need.kind].label} stone: waiting for the server result.`;
+        this.message = `Fusing a ${STONES[need.kind].label} stone${need.forAstral ? ' (the next Astral charge needs it)' : ''}: waiting for the server result.`;
       }
       return;
     }
@@ -14021,7 +14028,7 @@ const Alchemy = {
       UI.number(s.label + ': from +', () => c().from[kind], n => c().from[kind] = n, 0, 250));
     stones.append(UI.number('Stop after this many fusions (0 = no limit)', () => c().stoneLimit, n => c().stoneLimit = n, 0, 1000));
     stones.append(UI.row(UI.button('Fuse stones now', () => this.start(true)), UI.button('Stop', () => this.stop())),
-      el('p', 'Each stone adds a charge to the item, up to 6. Tick Use for the stones you want. Before every attempt at or above the plus you set, if the item has fewer charges than you asked to keep, one is fused automatically from a stone of the item\'s degree in your bag. Luck adds 5% to the chance, Steady stops the durability damage and Immortal stops the destruction when an enhancement fails from +5, and Astral keeps +4 instead of resetting to 0 (it needs Immortal charges). A fusion can fail and use up the stone. Stops if a stone is missing, the game refuses, or when it reaches the fusion limit above (off by default). Fuse stones now ignores the plus and only fills the charges.', 'muted'));
+      el('p', 'Each stone adds a charge to the item, up to 6. Tick Use for the stones you want. Before every attempt at or above the plus you set, if the item has fewer charges than you asked to keep, one is fused automatically from a stone of the item\'s degree in your bag. Luck adds 5% to the chance, Steady stops the durability damage and Immortal stops the destruction when an enhancement fails from +5, and Astral keeps +4 instead of resetting to 0. Each Astral charge needs an Immortal charge, so an Immortal stone is fused first when the weapon needs one, even with Immortal not ticked. A fusion can fail and use up the stone. Stops if a stone is missing, the game refuses, or when it reaches the fusion limit above (off by default). Fuse stones now ignores the plus and only fills the charges.', 'muted'));
     UI.pane.append(stones);
     const attrs = UI.group('Item attributes (stat percentages)');
     UI.attrRows = el('div'); UI.attrNote = el('p', '', 'muted'); attrs.append(UI.attrRows, UI.attrNote);

@@ -5419,6 +5419,36 @@ test('alchemy fuses stones before the elixirs, in order, and stops when a stone 
   assert.equal(g.Alchemy.run, null); assert.match(g.Alchemy.message, /No Steady stone of degree 9 in the bag/);
   assert.equal(g.commands.filter(c => c.mode === 'reinforce').length, 0);
 });
+function astralFixture(change, astralStones = 2) {
+  const f = stoneFixture(change);
+  f.World.gp.inventory = f.World.gp.inventory.map(i => i.slot === 13 ? { ...i, magicReferences: [...i.magicReferences, { paramId: 80, optionName: 'MATTR_ASTRAL' }] } : i);
+  f.World.gp.inventory.push({ slot: 19, refObjId: 6891, typeFlags: 0x3dec, quantity: astralStones });
+  return f;
+}
+const stoneSlots = f => f.commands.filter(c => c.mode === 'magic').map(c => c.slots[1]);
+test('an Astral charge waits for an Immortal one: Immortal is fused first, even when it is not ticked', () => {
+  const f = astralFixture({ luck: 0, astral: 1 });
+  f.Alchemy.start(true); f.Controller.tick();
+  assert.deepEqual(stoneSlots(f), [18], 'Immortal first');
+  assert.match(f.Alchemy.message, /Immortal stone \(the next Astral charge needs it\)/);
+  f.fused(18, 79, 1); f.advance(1500); f.Controller.tick();
+  assert.deepEqual(stoneSlots(f), [18, 19], 'then Astral');
+  f.fused(19, 80, 1); f.advance(1500); f.Controller.tick();
+  assert.equal(f.Alchemy.run, null); assert.match(f.Alchemy.message, /wanted stone counts/);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.Alchemy.result.stonesUsed)), { luck: 0, steady: 0, immortal: 1, astral: 1 });
+});
+test('Immortal goes before Astral below its own plus, and its missing stone is named', () => {
+  const f = astralFixture({ luck: 0, immortal: 1, astral: 2 }); f.Settings.profile.alchemy.from.immortal = 5;
+  f.Alchemy.start(); f.Controller.tick();
+  assert.deepEqual(stoneSlots(f), [18], 'Astral is due at +0, Immortal from +5: Immortal still goes first');
+  f.fused(18, 79, 1); f.advance(1500); f.Controller.tick(); assert.deepEqual(stoneSlots(f), [18, 19]);
+  f.fused(19, 80, 1); f.advance(1500); f.Controller.tick();
+  assert.deepEqual(stoneSlots(f), [18, 19, 18], 'a second Astral needs a second Immortal');
+  const g = astralFixture({ luck: 0, astral: 1 }); g.World.gp.inventory = g.World.gp.inventory.filter(i => i.slot !== 18);
+  g.Alchemy.start(true); g.Controller.tick();
+  assert.equal(g.Alchemy.run, null); assert.match(g.Alchemy.message, /No Immortal stone of degree 9 in the bag; each Astral charge needs an Immortal charge first/);
+  assert.deepEqual(stoneSlots(g), [], 'no Astral is tried without an Immortal charge');
+});
 function attributeFixture(targets = { NATTR_PA: 19 }, limit = 100) {
   const f = alchemyFixture(); const a = f.Settings.profile.alchemy;
   f.World.gp.inventory = f.World.gp.inventory.map(i => i.slot === 13 ? { ...i, variance: '0' } : i);
